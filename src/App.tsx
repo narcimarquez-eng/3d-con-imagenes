@@ -46,6 +46,7 @@ import {
   uint8ToBlob,
 } from './engine/exportEngine';
 import { OPTIMIZED_LOOP_REFERENCE_CODE } from './engine/objectPool';
+import { LAYER_CLASSES, layerMapToOffsets } from './engine/layerMap';
 import {
   StudioViewport,
   StudioViewportHandle,
@@ -378,7 +379,17 @@ const PATTERN_LABELS: Record<TexturePattern, string> = {
  * margins are filled with the image's own corner colour so background detection
  * still sees one uniform background.
  */
-function drawImageFittedToTensor(ctx: CanvasRenderingContext2D, img: HTMLImageElement) {
+export interface TensorCrop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Size of the source image the crop refers to. */
+  iw: number;
+  ih: number;
+}
+
+function drawImageFittedToTensor(ctx: CanvasRenderingContext2D, img: HTMLImageElement): TensorCrop {
   const size = CNN_TENSOR_SIZE;
   const iw = img.naturalWidth || img.width;
   const ih = img.naturalHeight || img.height;
@@ -466,6 +477,43 @@ function drawImageFittedToTensor(ctx: CanvasRenderingContext2D, img: HTMLImageEl
   const dw = cw * scale;
   const dh = ch * scale;
   ctx.drawImage(img, cx0, cy0, cw, ch, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  return { x: cx0, y: cy0, w: cw, h: ch, iw, ih };
+}
+
+/**
+ * Draws a painted layer map with exactly the same crop/scale as its picture,
+ * without smoothing (so flat colours stay flat), and converts it to offsets.
+ */
+function loadLayerMapIntoBuffers(
+  img: HTMLImageElement,
+  crop: TensorCrop | null,
+  offsets: Float32Array,
+  soft: Uint8Array
+) {
+  const size = CNN_TENSOR_SIZE;
+  const mw = img.naturalWidth || img.width;
+  const mh = img.naturalHeight || img.height;
+  // The map may be saved at another resolution than the picture: scale the crop.
+  const c = crop
+    ? {
+        x: (crop.x * mw) / crop.iw,
+        y: (crop.y * mh) / crop.ih,
+        w: (crop.w * mw) / crop.iw,
+        h: (crop.h * mh) / crop.ih,
+      }
+    : { x: 0, y: 0, w: mw, h: mh };
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, size, size);
+  const scale = Math.min(size / c.w, size / c.h);
+  const dw = c.w * scale;
+  const dh = c.h * scale;
+  ctx.drawImage(img, c.x, c.y, c.w, c.h, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  layerMapToOffsets(ctx.getImageData(0, 0, size, size).data, offsets, soft);
 }
 
 export default function App() {
@@ -479,6 +527,11 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const backFileInputRef = useRef<HTMLInputElement | null>(null);
+  const frontLayerInputRef = useRef<HTMLInputElement | null>(null);
+  const backLayerInputRef = useRef<HTMLInputElement | null>(null);
+  // Crop used for each picture, so its painted layer map is cropped the same way.
+  const frontCropRef = useRef<TensorCrop | null>(null);
+  const backCropRef = useRef<TensorCrop | null>(null);
   const sideFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const cnnBuffersRef = useRef<CNNReconstructionBuffers>(
@@ -494,6 +547,8 @@ export default function App() {
   );
   const [customImageName, setCustomImageName] = useState<string | null>(null);
   const [customBackImageName, setCustomBackImageName] = useState<string | null>(null);
+  const [frontLayerName, setFrontLayerName] = useState<string | null>(null);
+  const [backLayerName, setBackLayerName] = useState<string | null>(null);
   const [customSideImageName, setCustomSideImageName] = useState<string | null>(null);
 
   const [featureView, setFeatureView] = useState<CNNFeatureView>(
@@ -583,6 +638,7 @@ export default function App() {
     rigShowBones: true,
     humanBodyDepth: 1.0,
     humanFaceDetail: 1.0,
+    layerMapStrength: 1.0,
     humanReliefDetail: 0.5,
     silhouetteInflation: 0.75,
     contourSnapStrength: 1.0,
@@ -779,7 +835,7 @@ export default function App() {
         const srcCanvas = getSourceCanvas();
         const ctx = srcCanvas.getContext('2d');
         if (!ctx) return;
-        drawImageFittedToTensor(ctx, img);
+        frontCropRef.current = drawImageFittedToTensor(ctx, img);
         setCustomImageName(file.name);
         setFeatureView(CNNFeatureView.RGBInput);
         setZones(DEFAULT_ZONES.map((z) => ({ ...z })));
@@ -798,6 +854,42 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  const handleLayerMapUpload = (side: 'front' | 'back') => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const b = cnnBuffersRef.current;
+        if (side === 'front') {
+          loadLayerMapIntoBuffers(img, frontCropRef.current, b.frontLayerOffset, b.frontLayerSoft);
+          b.hasFrontLayer = true;
+          setFrontLayerName(file.name);
+        } else {
+          loadLayerMapIntoBuffers(img, backCropRef.current, b.backLayerOffset, b.backLayerSoft);
+          b.hasBackLayer = true;
+          setBackLayerName(file.name);
+        }
+        setCnnVersion((v) => v + 1);
+      };
+      if (typeof ev.target?.result === 'string') img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const clearLayerMaps = () => {
+    const b = cnnBuffersRef.current;
+    b.frontLayerOffset.fill(NaN);
+    b.backLayerOffset.fill(NaN);
+    b.hasFrontLayer = false;
+    b.hasBackLayer = false;
+    setFrontLayerName(null);
+    setBackLayerName(null);
+    setCnnVersion((v) => v + 1);
+  };
+
   const handleBackImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -811,7 +903,7 @@ export default function App() {
         tmpCanvas.height = CNN_TENSOR_SIZE;
         const ctx = tmpCanvas.getContext('2d');
         if (!ctx) return;
-        drawImageFittedToTensor(ctx, img);
+        backCropRef.current = drawImageFittedToTensor(ctx, img);
         processUploadedBackImage(tmpCanvas, cnnBuffersRef.current);
         setCustomBackImageName(file.name);
         setParams((prev) => ({
@@ -1345,6 +1437,20 @@ export default function App() {
                 className="hidden"
               />
               <input
+                ref={frontLayerInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleLayerMapUpload('front')}
+                className="hidden"
+              />
+              <input
+                ref={backLayerInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleLayerMapUpload('back')}
+                className="hidden"
+              />
+              <input
                 ref={sideFileInputRef}
                 type="file"
                 accept="image/*"
@@ -1433,6 +1539,70 @@ export default function App() {
                             }
                             className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
                           />
+                        </div>
+                      </div>
+                      {/* Painted layer maps */}
+                      <div className="mt-2.5 pt-2.5 border-t border-emerald-500/20">
+                        <span className="text-xs font-semibold text-emerald-200">Mapa de capas (relieve pintado)</span>
+                        <p className="text-[11px] text-slate-400 mt-0.5 mb-1.5">
+                          Pinta encima de una copia de tu imagen (mismo tamaño) con estos colores planos. La textura
+                          sigue saliendo de la imagen original; el mapa solo indica qué sobresale y cuánto.
+                        </p>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 mb-2">
+                          {LAYER_CLASSES.map((c) => (
+                            <span key={c.id} className="flex items-center gap-1 text-[11px] text-slate-300">
+                              <span
+                                className="inline-block w-3 h-3 rounded-sm border border-slate-600"
+                                style={{ backgroundColor: `rgb(${c.rgb.join(',')})` }}
+                              />
+                              {c.label}
+                            </span>
+                          ))}
+                          <span className="text-[11px] text-slate-500">Otros colores: sin cambio</span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={params.humanBodyTemplate === false}
+                            onClick={() => frontLayerInputRef.current?.click()}
+                            className="px-2 py-1 text-[11px] font-semibold rounded border border-emerald-500/50 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20 cursor-pointer disabled:opacity-40"
+                          >
+                            {frontLayerName ? `Frente: ${frontLayerName}` : 'Subir mapa (frente)'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={params.humanBodyTemplate === false}
+                            onClick={() => backLayerInputRef.current?.click()}
+                            className="px-2 py-1 text-[11px] font-semibold rounded border border-emerald-500/50 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20 cursor-pointer disabled:opacity-40"
+                          >
+                            {backLayerName ? `Espalda: ${backLayerName}` : 'Subir mapa (espalda)'}
+                          </button>
+                          {(frontLayerName || backLayerName) && (
+                            <button
+                              type="button"
+                              onClick={clearLayerMaps}
+                              className="px-2 py-1 text-[11px] rounded border border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 cursor-pointer"
+                            >
+                              Quitar mapas
+                            </button>
+                          )}
+                          <div className="flex items-center gap-2 ml-2 min-w-[180px] flex-1">
+                            <span className="text-[11px] text-slate-400 whitespace-nowrap">Altura de capas</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={3}
+                              step={0.05}
+                              value={params.layerMapStrength ?? 1}
+                              onChange={(e) =>
+                                setParams((p) => ({ ...p, layerMapStrength: parseFloat(e.target.value) }))
+                              }
+                              className="w-full accent-emerald-400 cursor-pointer"
+                            />
+                            <span className="font-mono text-[11px] text-slate-200 tabular-nums">
+                              {(params.layerMapStrength ?? 1).toFixed(2)}
+                            </span>
+                          </div>
                         </div>
                       </div>
                       {/* Skeleton + animations */}

@@ -214,6 +214,13 @@ export class CNNReconstructionBuffers {
   public readonly backDepthTensor = new Float32Array(TENSOR_LEN);
   public readonly backNormalTensor = new Float32Array(TENSOR_LEN * 3);
   public hasCustomBackImage = false;
+  // Optional painted layer maps (see layerMap.ts): offset per texel in units, NaN = no change.
+  public readonly frontLayerOffset = new Float32Array(TENSOR_LEN).fill(NaN);
+  public readonly frontLayerSoft = new Uint8Array(TENSOR_LEN);
+  public hasFrontLayer = false;
+  public readonly backLayerOffset = new Float32Array(TENSOR_LEN).fill(NaN);
+  public readonly backLayerSoft = new Uint8Array(TENSOR_LEN);
+  public hasBackLayer = false;
   public backAutoBgR = 0.047;
   public backAutoBgG = 0.071;
   public backAutoBgB = 0.125;
@@ -7338,6 +7345,12 @@ export function buildReconstructedMeshGeometry(
         mask: buffers.texelCutoutMask,
         w: CNN_TENSOR_SIZE,
         frontRgb: buffers.rgbInput,
+        frontLayer: buffers.hasFrontLayer
+          ? { offset: buffers.frontLayerOffset, soft: buffers.frontLayerSoft }
+          : null,
+        backLayer: buffers.hasBackLayer
+          ? { offset: buffers.backLayerOffset, soft: buffers.backLayerSoft }
+          : null,
         frontRelief: buffers.depthTensor,
         backRelief: buffers.backDepthTensor,
         vertexUsedMask: buffers.vertexCutoutMask,
@@ -7358,6 +7371,7 @@ export function buildReconstructedMeshGeometry(
         // Finer than the relief grid so small features (face, fingers) have vertices.
         rows: Math.round(Math.max(32, Math.min(144, params.gridResolution)) * 2.2),
         faceDetail: params.humanFaceDetail ?? 1.0,
+        layerStrength: params.layerMapStrength ?? 1.0,
         rig: params.enableSkeleton === true,
       }
     );

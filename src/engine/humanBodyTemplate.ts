@@ -21,6 +21,9 @@ export interface HumanBodyInputs {
   w: number;
   /** Front image RGB (0..1), size w*w*3. Used to find the eyes and chin. */
   frontRgb?: Float32Array;
+  /** Painted layer maps (offset in units per texel, NaN = no change); the back one is in back-image coordinates. */
+  frontLayer?: { offset: Float32Array; soft: Uint8Array } | null;
+  backLayer?: { offset: Float32Array; soft: Uint8Array } | null;
   /** Normalised photo relief of the front / back image, size w*w. */
   frontRelief: Float32Array;
   backRelief: Float32Array;
@@ -50,6 +53,8 @@ export interface HumanBodyOptions {
   rows: number;
   /** Also build a skeleton and skin weights (skinIndex / skinWeight attributes). */
   rig?: boolean;
+  /** Height multiplier for painted layer maps. */
+  layerStrength?: number;
   /** Strength of the facial features (0 = none, 1 = subtle). */
   faceDetail?: number;
   /** Add shoes (flat sole, toe forward). Default true. */
@@ -691,6 +696,45 @@ function addPhotoDetail(dst: Float32Array, base: Float32Array, relief: Float32Ar
 }
 
 /**
+ * Adds the painted layer map to a depth map: each class raises (or sinks) the
+ * surface by its offset. Hard materials get a small bevel, fur/hair a soft edge.
+ * `mirror` reads the map flipped horizontally (back view seen from the front).
+ */
+function addLayerRelief(
+  D: Float32Array,
+  layer: { offset: Float32Array; soft: Uint8Array },
+  mask: Uint8Array,
+  w: number,
+  unit: number,
+  mirror: boolean
+) {
+  const n = w * w;
+  const hard = new Float32Array(n);
+  const soft = new Float32Array(n);
+  for (let y = 0; y < w; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (mask[i] !== 1) continue;
+      const j = mirror ? y * w + (w - 1 - x) : i;
+      const o = layer.offset[j];
+      if (!Number.isFinite(o)) continue;
+      if (layer.soft[j]) soft[i] = o;
+      else hard[i] = o;
+    }
+  }
+  blur5(hard, w, 1, mask);
+  blur5(soft, w, 3, mask);
+  for (let i = 0; i < n; i++) {
+    if (mask[i] !== 1) continue;
+    const add = (hard[i] + soft[i]) * unit;
+    if (add === 0) continue;
+    // Fade at the outline so front and back still close neatly.
+    const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 3));
+    D[i] = Math.max(0, D[i] + add * fade);
+  }
+}
+
+/**
  * Subtle human facial relief on the front of the head, placed with classic
  * proportions (hair or a helmet take the top of the head, so the eyes sit at
  * ~56% of the head height, nose tip ~73%, chin at the bottom): brow ridge, eye sockets, nose bridge and tip, cheekbones, a soft
@@ -948,8 +992,14 @@ export function buildHumanBodyTemplateGeometry(
   }
   // Note: buildHumanDepthMap also fills _dist, which addPhotoDetail uses for fading.
   const reliefTexels = 9 * Math.max(0, Math.min(1, options.reliefAmount));
-  addPhotoDetail(_frontD, _depth, inputs.frontRelief, mask, w, reliefTexels);
-  addPhotoDetail(_backD, _depth, inputs.backRelief, mask, w, reliefTexels);
+  // With a painted layer map the relief comes from the map; keep only a little photo detail.
+  const frontRelief = inputs.frontLayer ? reliefTexels * 0.35 : reliefTexels;
+  const backRelief = inputs.backLayer ? reliefTexels * 0.35 : reliefTexels;
+  addPhotoDetail(_frontD, _depth, inputs.frontRelief, mask, w, frontRelief);
+  addPhotoDetail(_backD, _depth, inputs.backRelief, mask, w, backRelief);
+  const unit = 0.012 * Math.max(1, landmarks.bottom - landmarks.top) * Math.max(0, options.layerStrength ?? 1);
+  if (inputs.frontLayer && unit > 0) addLayerRelief(_frontD, inputs.frontLayer, mask, w, unit, false);
+  if (inputs.backLayer && unit > 0) addLayerRelief(_backD, inputs.backLayer, mask, w, unit, true);
   addFaceRelief(_frontD, mask, w, landmarks, Math.max(0, Math.min(2, options.faceDetail ?? 1)));
   buildOutlineField(mask, w);
 

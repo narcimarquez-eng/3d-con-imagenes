@@ -91,6 +91,7 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 - **Barbilla:** los cuellos de piel tapan la silueta del cuello; la barbilla se saca del cráneo o de la cara detectada, no de la silueta.
 - **Mapas pintados en JPEG:** los colores no son puros; el verde de piel del usuario era (12,156,12). Por eso se clasifica por tono.
 - **Índices de fila:** redondéalos siempre (un `neckY` con decimales rompió `runsByRow`).
+- **Pelo claro (plateado, rubio) desaparecía de la silueta:** `fg_photo` de `split_sheet.py` solo tomaba píxeles oscuros o saturados, así que la cabeza salía como un cilindro liso. Ahora la figura es todo lo que no sea blanco casi puro (el fondo). Si la silueta sigue sin cubrir el pelo, mira el IoU del divisor y la vista en gris de la cabeza.
 - **Pruebas sin navegador:** pueden engañar si el recorte no es idéntico al de la app; para datos fiables, lee los resultados desde la app.
 - **Animación Saludar:** la hombrera se queda en su sitio y la axila se estira. Es una limitación conocida.
 

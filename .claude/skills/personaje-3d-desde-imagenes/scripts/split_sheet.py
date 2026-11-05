@@ -25,9 +25,11 @@ from PIL import Image
 
 
 def fg_photo(a):
+    # Background is almost pure white. Anything else is figure, including pale
+    # hair (silver, blond) that a "dark or saturated" test would cut out.
     sat = a.max(2) - a.min(2)
     lum = a.mean(2)
-    return (sat > 45) | (lum < 95)
+    return (sat > 45) | (lum < 95) | ((lum < 228) | (sat > 14))
 
 
 def fg_map(a):

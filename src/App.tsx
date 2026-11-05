@@ -374,7 +374,7 @@ const PATTERN_LABELS: Record<TexturePattern, string> = {
 
 /**
  * Draws an uploaded image into the square CNN tensor canvas without stretching it.
- * The image is scaled to fit (keeping its aspect ratio) and centred; the empty
+ * The image is cropped to the character, scaled to fit (keeping its aspect ratio) and centred; the empty
  * margins are filled with the image's own corner colour so background detection
  * still sees one uniform background.
  */
@@ -403,13 +403,69 @@ function drawImageFittedToTensor(ctx: CanvasRenderingContext2D, img: HTMLImageEl
     fill = a / n < 32 ? 'rgba(0,0,0,0)' : `rgb(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)})`;
   }
 
+  // Crop to the character: bounding box of pixels that differ from the background.
+  let cx0 = 0;
+  let cy0 = 0;
+  let cw = iw;
+  let ch = ih;
+  if (pctx) {
+    const ps = Math.min(1, 512 / Math.max(iw, ih));
+    const sw = Math.max(1, Math.round(iw * ps));
+    const sh = Math.max(1, Math.round(ih * ps));
+    const small = document.createElement('canvas');
+    small.width = sw;
+    small.height = sh;
+    const sctx = small.getContext('2d', { willReadFrequently: true });
+    if (sctx) {
+      sctx.drawImage(img, 0, 0, sw, sh);
+      const d = sctx.getImageData(0, 0, sw, sh).data;
+      const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(fill);
+      const transparentBg = !m;
+      const br = m ? +m[1] : 0;
+      const bg = m ? +m[2] : 0;
+      const bb = m ? +m[3] : 0;
+      const colCount = new Int32Array(sw);
+      const rowCount = new Int32Array(sh);
+      for (let y = 0; y < sh; y++) {
+        for (let x = 0; x < sw; x++) {
+          const o = (y * sw + x) * 4;
+          const fg = transparentBg
+            ? d[o + 3] > 32
+            : (d[o] - br) ** 2 + (d[o + 1] - bg) ** 2 + (d[o + 2] - bb) ** 2 > 30 * 30;
+          if (fg) {
+            colCount[x]++;
+            rowCount[y]++;
+          }
+        }
+      }
+      // Ignore specks: a row/column must hold a few foreground pixels.
+      const minHits = 2;
+      let x0 = 0, x1 = sw - 1, y0 = 0, y1 = sh - 1;
+      while (x0 < sw && colCount[x0] < minHits) x0++;
+      while (x1 > x0 && colCount[x1] < minHits) x1--;
+      while (y0 < sh && rowCount[y0] < minHits) y0++;
+      while (y1 > y0 && rowCount[y1] < minHits) y1--;
+      if (x1 - x0 > sw * 0.05 && y1 - y0 > sh * 0.05) {
+        const margin = Math.round(Math.max(x1 - x0, y1 - y0) * 0.03);
+        x0 = Math.max(0, x0 - margin);
+        y0 = Math.max(0, y0 - margin);
+        x1 = Math.min(sw - 1, x1 + margin);
+        y1 = Math.min(sh - 1, y1 + margin);
+        cx0 = x0 / ps;
+        cy0 = y0 / ps;
+        cw = (x1 - x0 + 1) / ps;
+        ch = (y1 - y0 + 1) / ps;
+      }
+    }
+  }
+
   ctx.clearRect(0, 0, size, size);
   ctx.fillStyle = fill;
   ctx.fillRect(0, 0, size, size);
-  const scale = Math.min(size / iw, size / ih);
-  const dw = iw * scale;
-  const dh = ih * scale;
-  ctx.drawImage(img, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  const scale = Math.min(size / cw, size / ch);
+  const dw = cw * scale;
+  const dh = ch * scale;
+  ctx.drawImage(img, cx0, cy0, cw, ch, (size - dw) / 2, (size - dh) / 2, dw, dh);
 }
 
 export default function App() {

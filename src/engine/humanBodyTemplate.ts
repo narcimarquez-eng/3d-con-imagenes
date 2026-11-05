@@ -31,6 +31,8 @@ export interface HumanBodyInputs {
 export interface AtlasRepairInput {
   /** RGBA8 atlas (front quadrant at x 0..w-1, back quadrant at x w..2w-1, rows 0..w-1). */
   albedo: Uint8Array;
+  /** RGBA8 roughness (G) / metalness (B) atlas with the same layout. */
+  roughMetal?: Uint8Array;
   atlasWidth: number;
   /** Background colour of the front / back photos (0..1). */
   background: [number, number, number];
@@ -46,6 +48,8 @@ export interface HumanBodyOptions {
   rows: number;
   /** Also build a skeleton and skin weights (skinIndex / skinWeight attributes). */
   rig?: boolean;
+  /** Add shoes (flat sole, toe forward). Default true. */
+  shoes?: boolean;
 }
 
 export interface HumanBodyLandmarks {
@@ -620,6 +624,48 @@ export function repairAtlasRim(input: AtlasRepairInput, mask: Uint8Array, w: num
 }
 
 /**
+ * The roughness/metalness atlas is classified per pixel and comes out noisy,
+ * which shows as sparkling dots. Blur it (inside the silhouette) per quadrant.
+ */
+function smoothRoughMetal(rm: Uint8Array, atlasWidth: number, mask: Uint8Array, w: number) {
+  const chan = new Float32Array(w * w);
+  const tmp = new Float32Array(w * w);
+  for (const qx of [0, w]) {
+    for (const c of [1, 2]) {
+      for (let y = 0; y < w; y++) for (let x = 0; x < w; x++) chan[y * w + x] = rm[(y * atlasWidth + qx + x) * 4 + c];
+      for (let p = 0; p < 3; p++) {
+        for (let y = 0; y < w; y++) {
+          for (let x = 0; x < w; x++) {
+            let sum = 0;
+            for (let o = -2; o <= 2; o++) {
+              const sx = x + o < 0 ? 0 : x + o >= w ? w - 1 : x + o;
+              sum += chan[y * w + sx] * K5[o + 2];
+            }
+            tmp[y * w + x] = sum;
+          }
+        }
+        for (let y = 0; y < w; y++) {
+          for (let x = 0; x < w; x++) {
+            let sum = 0;
+            for (let o = -2; o <= 2; o++) {
+              const sy = y + o < 0 ? 0 : y + o >= w ? w - 1 : y + o;
+              sum += tmp[sy * w + x] * K5[o + 2];
+            }
+            chan[y * w + x] = sum;
+          }
+        }
+      }
+      for (let y = 0; y < w; y++) {
+        for (let x = 0; x < w; x++) {
+          if (mask[y * w + x] !== 1) continue;
+          rm[(y * atlasWidth + qx + x) * 4 + c] = Math.round(chan[y * w + x]);
+        }
+      }
+    }
+  }
+}
+
+/**
  * Replaces `geometry` with a closed human-body mesh fitted to the silhouette.
  * UVs use the same atlas layout as the relief pipeline: front image in the
  * top-left quadrant, back image (already mirrored/aligned) in the top-right.
@@ -634,7 +680,10 @@ export function buildHumanBodyTemplateGeometry(
 
   // The depth map is computed before the outline field because both use _tmp.
   const landmarks = buildHumanDepthMap(mask, w);
-  if (inputs.atlas) repairAtlasRim(inputs.atlas, mask, w);
+  if (inputs.atlas) {
+    repairAtlasRim(inputs.atlas, mask, w);
+    if (inputs.atlas.roughMetal) smoothRoughMetal(inputs.atlas.roughMetal, inputs.atlas.atlasWidth, mask, w);
+  }
   // Note: buildHumanDepthMap also fills _dist, which addPhotoDetail uses for fading.
   const reliefTexels = 9 * Math.max(0, Math.min(1, options.reliefAmount));
   addPhotoDetail(_frontD, _depth, inputs.frontRelief, mask, w, reliefTexels);
@@ -917,13 +966,47 @@ export function buildHumanBodyTemplateGeometry(
     nor[v * 3 + 2] /= l;
   }
 
+  // 7) Shoes: one per leg, with a flat sole, the toe forward and the heel back.
+  const shoes = options.shoes === false ? [] : buildShoes(mask, w, landmarks, texelWorld);
+  let shoeVerts = 0;
+  let shoeIdx = 0;
+  for (const sh of shoes) {
+    shoeVerts += sh.pos.length / 3;
+    shoeIdx += sh.index.length;
+  }
+  const total = vCount + shoeVerts;
+  if (total > inputs.maxVertices) shoes.length = 0;
+  const allCount = shoes.length ? total : vCount;
+  const P = new Float32Array(allCount * 3);
+  const N = new Float32Array(allCount * 3);
+  const U = new Float32Array(allCount * 2);
+  const C = new Float32Array(allCount * 3).fill(1);
+  const I = new Uint32Array(ip + (shoes.length ? shoeIdx : 0));
+  P.set(pos);
+  N.set(nor);
+  U.set(uv);
+  I.set(index.subarray(0, ip));
+  let vb = vCount;
+  let ib = ip;
+  const shoeRanges: Array<{ start: number; count: number; side: -1 | 1; soleY: number; height: number }> = [];
+  for (const sh of shoes) {
+    const n = sh.pos.length / 3;
+    P.set(sh.pos, vb * 3);
+    N.set(sh.nor, vb * 3);
+    U.set(sh.uv, vb * 2);
+    for (let k = 0; k < sh.index.length; k++) I[ib + k] = sh.index[k] + vb;
+    shoeRanges.push({ start: vb, count: n, side: sh.side, soleY: sh.soleY, height: sh.height });
+    vb += n;
+    ib += sh.index.length;
+  }
+
   // Skeleton + skin weights (optional).
   let rig: HumanRig | undefined;
   if (options.rig) {
     rig = computeHumanRig(mask, w, landmarks, WORLD_SPAN);
     const maps = computeSkinWeightMaps(rig, mask, w, WORLD_SPAN);
-    const skinIndex = new Uint16Array(vCount * 4);
-    const skinWeight = new Float32Array(vCount * 4);
+    const skinIndex = new Uint16Array(allCount * 4);
+    const skinWeight = new Float32Array(allCount * 4);
     for (let n = 0; n < nNodes; n++) {
       const f = frontIdx[n];
       if (f < 0) continue;
@@ -934,6 +1017,21 @@ export function buildHumanBodyTemplateGeometry(
         skinWeight[b * 4 + k] = skinWeight[f * 4 + k];
       }
     }
+    // Shoes follow the foot, blending into the shin at the top.
+    const boneIndex = (name: string) => Math.max(0, rig!.bones.findIndex((b) => b.name === name));
+    for (const r of shoeRanges) {
+      const sideName = r.side < 0 ? 'Right' : 'Left';
+      const foot = boneIndex(`${sideName}Foot`);
+      const leg = boneIndex(`${sideName}Leg`);
+      for (let v = r.start; v < r.start + r.count; v++) {
+        const t = (P[v * 3 + 1] - r.soleY) / Math.max(1e-6, r.height);
+        const wLeg = Math.max(0, Math.min(0.5, (t - 0.55) * 1.2));
+        skinIndex[v * 4] = foot;
+        skinWeight[v * 4] = 1 - wLeg;
+        skinIndex[v * 4 + 1] = leg;
+        skinWeight[v * 4 + 1] = wLeg;
+      }
+    }
     geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
     geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeight, 4));
   } else {
@@ -942,17 +1040,116 @@ export function buildHumanBodyTemplateGeometry(
   }
 
   inputs.vertexUsedMask.fill(0);
-  inputs.vertexUsedMask.fill(1, 0, vCount);
+  inputs.vertexUsedMask.fill(1, 0, allCount);
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  geometry.setIndex(new THREE.BufferAttribute(index.slice(0, ip), 1));
+  geometry.setAttribute('position', new THREE.BufferAttribute(P, 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(N, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(U, 2));
+  geometry.setAttribute('color', new THREE.BufferAttribute(C, 3));
+  geometry.setIndex(new THREE.BufferAttribute(I, 1));
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
 
-  return { vertexCount: vCount, triangleCount: ip / 3, landmarks, rig };
+  return { vertexCount: allCount, triangleCount: I.length / 3, landmarks, rig };
+}
+
+interface ShoePart {
+  side: -1 | 1;
+  pos: Float32Array;
+  nor: Float32Array;
+  uv: Float32Array;
+  index: Uint32Array;
+  soleY: number;
+  height: number;
+}
+
+/**
+ * Builds a shoe for each leg: an ellipsoid stretched along Z (toe forward,
+ * heel back), lower towards the toe and cut flat at the sole. It is textured
+ * with the front image of the boot and covers the end of the leg.
+ */
+function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWorld: number): ShoePart[] {
+  const H = lm.bottom - lm.top + 1;
+  if (H < 20) return [];
+  const ax = lm.axisX;
+  const ankleY = Math.round(lm.bottom - 0.075 * H);
+  const parts: ShoePart[] = [];
+  const toWX = (tx: number) => (tx / (w - 1) - 0.5) * WORLD_SPAN;
+  const toWY = (ty: number) => (0.5 - ty / (w - 1)) * WORLD_SPAN;
+
+  for (const side of [-1, 1] as const) {
+    // Extent of this foot in the bottom rows.
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let y = ankleY; y <= lm.bottom; y++) {
+      const runs = rowRuns(mask, w, y);
+      for (const [a, b] of runs) {
+        // Keep the part of the run on this side of the axis.
+        const lo = side < 0 ? a : Math.max(a, Math.ceil(ax));
+        const hi = side < 0 ? Math.min(b, Math.floor(ax)) : b;
+        if (hi < lo) continue;
+        // Ignore runs far from the legs (e.g. a weapon on the floor).
+        if (Math.abs((lo + hi) / 2 - ax) > 0.3 * H) continue;
+        minX = Math.min(minX, lo);
+        maxX = Math.max(maxX, hi);
+      }
+    }
+    if (!Number.isFinite(minX) || maxX - minX < 2) continue;
+
+    const halfW = ((maxX - minX + 1) / 2) * texelWorld;
+    const cx = toWX((minX + maxX) / 2);
+    const soleY = toWY(lm.bottom + 0.5);
+    const height0 = 0.105 * H * texelWorld; // heel / ankle height
+    const length = 0.17 * H * texelWorld;
+    const heelZ = -halfW * 1.0;
+
+    // Boot shape from a sphere: boxier section, flat sole, high heel side, low toe.
+    const box = (v: number, e: number) => Math.sign(v) * Math.pow(Math.abs(v), e);
+    const sphere = new THREE.SphereGeometry(1, 32, 20);
+    const sp = sphere.getAttribute('position') as THREE.BufferAttribute;
+    const n = sp.count;
+    const pos = new Float32Array(n * 3);
+    const uv = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const ux = box(sp.getX(i), 0.55);
+      const uy = box(sp.getY(i), 0.5);
+      const uz = box(sp.getZ(i), 0.7);
+      const t = (uz + 1) / 2; // 0 = heel, 1 = toe
+      const toeT = Math.max(0, Math.min(1, (t - 0.35) / 0.65));
+      const hp = 1 - 0.58 * toeT * toeT * (3 - 2 * toeT);
+      const wp = 0.9 + 0.16 * Math.sin(Math.PI * Math.min(1, t * 1.1)) - 0.12 * toeT * toeT;
+      const X = cx + ux * halfW * 0.98 * wp;
+      const Y = soleY + ((uy + 1) / 2) * height0 * hp;
+      const Z = heelZ + t * length;
+      pos[i * 3] = X;
+      pos[i * 3 + 1] = Y;
+      pos[i * 3 + 2] = Z;
+      // Front projection of the boot, kept inside the foot's own pixels.
+      const tx = Math.max(minX + 1, Math.min(maxX - 1, (X / WORLD_SPAN + 0.5) * (w - 1)));
+      const ty = Math.max(ankleY - 0.06 * H, Math.min(lm.bottom - 1.5, (0.5 - Y / WORLD_SPAN) * (w - 1)));
+      uv[i * 2] = 0.002 + (tx / (w - 1)) * 0.495;
+      uv[i * 2 + 1] = 0.002 + (ty / (w - 1)) * 0.495;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setIndex(sphere.getIndex());
+    g.computeVertexNormals();
+    const idx = sphere.getIndex()!;
+    const index = new Uint32Array(idx.count);
+    for (let k = 0; k < idx.count; k++) index[k] = idx.getX(k);
+    parts.push({
+      side,
+      pos,
+      nor: (g.getAttribute('normal') as THREE.BufferAttribute).array as Float32Array,
+      uv,
+      index,
+      soleY,
+      height: height0,
+    });
+    sphere.dispose();
+    g.dispose();
+  }
+  return parts;
 }
 
 /** Debug helper: depth map (texels), core mask and landmarks for a silhouette. */

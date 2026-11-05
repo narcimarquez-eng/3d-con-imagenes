@@ -7343,6 +7343,7 @@ export function buildReconstructedMeshGeometry(
         maxVertices: CNNReconstructionBuffers.MAX_VERTICES,
         atlas: {
           albedo: albData,
+          roughMetal: rmData,
           atlasWidth: atlasW,
           background: [buffers.autoDetectedBgR, buffers.autoDetectedBgG, buffers.autoDetectedBgB],
           backBackground: buffers.hasCustomBackImage

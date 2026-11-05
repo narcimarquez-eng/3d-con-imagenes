@@ -695,6 +695,37 @@ function addPhotoDetail(dst: Float32Array, base: Float32Array, relief: Float32Ar
   }
 }
 
+/** Keeps only the largest 4-connected region of a mask (in place). */
+function keepLargestComponent(mask: Uint8Array, w: number) {
+  const n = w * w;
+  const label = new Int32Array(n).fill(-1);
+  const queue = new Int32Array(n);
+  let best = -1;
+  let bestSize = 0;
+  let comp = 0;
+  for (let s0 = 0; s0 < n; s0++) {
+    if (mask[s0] !== 1 || label[s0] >= 0) continue;
+    let qh = 0;
+    let qt = 0;
+    queue[qt++] = s0;
+    label[s0] = comp;
+    while (qh < qt) {
+      const i = queue[qh++];
+      const x = i % w;
+      if (x > 0 && mask[i - 1] === 1 && label[i - 1] < 0) { label[i - 1] = comp; queue[qt++] = i - 1; }
+      if (x < w - 1 && mask[i + 1] === 1 && label[i + 1] < 0) { label[i + 1] = comp; queue[qt++] = i + 1; }
+      if (i >= w && mask[i - w] === 1 && label[i - w] < 0) { label[i - w] = comp; queue[qt++] = i - w; }
+      if (i < n - w && mask[i + w] === 1 && label[i + w] < 0) { label[i + w] = comp; queue[qt++] = i + w; }
+    }
+    if (qt > bestSize) {
+      bestSize = qt;
+      best = comp;
+    }
+    comp++;
+  }
+  for (let i = 0; i < n; i++) if (mask[i] === 1 && label[i] !== best) mask[i] = 0;
+}
+
 /**
  * Adds the painted layer map to a depth map: each class raises (or sinks) the
  * surface by its offset. Hard materials get a small bevel, fur/hair a soft edge.
@@ -981,7 +1012,23 @@ export function buildHumanBodyTemplateGeometry(
   inputs: HumanBodyInputs,
   options: HumanBodyOptions
 ): HumanBodyStats {
-  const { mask, w } = inputs;
+  const { w } = inputs;
+  // A painted layer map marks exactly what belongs to the character: add it to
+  // the automatic cutout so thin parts it missed (horns, spikes) come back.
+  let mask = inputs.mask;
+  if (inputs.frontLayer || inputs.backLayer) {
+    mask = inputs.mask.slice();
+    for (let y = 0; y < w; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (inputs.frontLayer && Number.isFinite(inputs.frontLayer.offset[i])) mask[i] = 1;
+        const j = y * w + (w - 1 - x);
+        if (inputs.backLayer && Number.isFinite(inputs.backLayer.offset[j])) mask[i] = 1;
+      }
+    }
+    // Keep only what touches the main body (stray paint specks are dropped).
+    keepLargestComponent(mask, w);
+  }
   ensureBuffers(w);
 
   // The depth map is computed before the outline field because both use _tmp.

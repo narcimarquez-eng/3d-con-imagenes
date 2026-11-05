@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "title": "Lineage Style Warrior - 3D A-Pose Point Cloud & Mesh Coordinates",
+    "total_points": 10000,
+    "coordinate_system": "Cartesian (Right-handed: X=Right, Y=Up, Z=Forward)",
+    "bounding_box": {
+      "x_min": -0.84, "x_max": 0.98,
+      "y_min": -0.05, "y_max": 1.94,
+      "z_min": -0.32, "z_max": 0.28
+    },
+    "height_units": 1.99,
+    "parts_summary": { ... }
+  },
+  "points": [
+    {"id": 0, "x": 0.0, "y": 1.93, "z": 0.03, "part": "head_face"},
+    ...
+  ],
+  "flat_xyz": [0.0, 1.93, 0.03, ...]
+}

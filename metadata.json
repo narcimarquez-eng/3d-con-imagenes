@@ -1,0 +1,6 @@
+{
+  "name": "Vortex3D — Estudio de Reconstrucción 3D Neuronal y Matemática",
+  "description": "Generador de modelos 3D en tiempo real a partir de imágenes mediante redes neuronales convolucionales (CNN) y superficies matemáticas paramétricas, con edición de malla y textura por zonas, iluminación PBR dinámica y exportación nativa en formato .GLB.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

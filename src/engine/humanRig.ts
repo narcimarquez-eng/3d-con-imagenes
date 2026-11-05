@@ -415,6 +415,7 @@ export const RIG_ANIMATIONS = [
   { id: 'walk', label: 'Caminar' },
   { id: 'run', label: 'Correr' },
   { id: 'wave', label: 'Saludar' },
+  { id: 'strike', label: 'Golpear' },
 ] as const;
 
 export type RigAnimationId = (typeof RIG_ANIMATIONS)[number]['id'];
@@ -481,6 +482,22 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
   const spinQ = new THREE.Quaternion();
   const spinInv = new THREE.Quaternion();
 
+  // Arms hang out to the side at rest, so forward and back is not a rotation
+  // around world X. Each arm gets a frame whose X axis is perpendicular to its
+  // rest direction and to Z: swings there move the arm forward and back.
+  // Only walk, run and strike use it (wave keeps its own raise).
+  const armFrame = new Map<string, THREE.Quaternion>();
+  for (const prefix of ['Right', 'Left']) {
+    for (const part of ['Arm', 'ForeArm']) {
+      const bone = boneHead.get(`${prefix}${part}`);
+      if (!bone) continue;
+      const dir = new THREE.Vector3(bone.tail[0] - bone.head[0], bone.tail[1] - bone.head[1], bone.tail[2] - bone.head[2]).normalize();
+      const n = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 0, 1));
+      if (n.lengthSq() < 1e-6) continue;
+      armFrame.set(`${prefix}${part}`, new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), n.normalize()));
+    }
+  }
+
   // Angle (around Z) that turns an arm from its rest direction to "raised up and out".
   const raiseAngle = (armName: string, side: -1 | 1) => {
     const b = boneHead.get(armName)!;
@@ -499,7 +516,7 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     name: string,
     duration: number,
     samples: number,
-    pose: (p: number) => { rot: Pose; hipsOffset?: [number, number, number] }
+    pose: (p: number) => { rot: Pose; hipsOffset?: [number, number, number]; armFrames?: boolean }
   ) => {
     const times: number[] = [];
     const rotValues = new Map<string, number[]>();
@@ -509,15 +526,20 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     for (let s = 0; s <= samples; s++) {
       const p = s / samples;
       times.push(p * duration);
-      const { rot, hipsOffset } = pose(p % 1);
+      const { rot, hipsOffset, armFrames } = pose(p % 1);
       for (const b of rig.bones) {
         const r = rot[b.name] || [0, 0, 0];
         e.set(r[0], r[1], r[2], 'XYZ');
         q.setFromEuler(e);
         const spin = legSpin.get(b.name);
+        const frame = armFrames ? armFrame.get(b.name) : undefined;
         if (spin) {
           spinQ.setFromAxisAngle(yAxis, spin);
           spinInv.copy(spinQ).invert();
+          q.premultiply(spinQ).multiply(spinInv);
+        } else if (frame) {
+          spinQ.copy(frame);
+          spinInv.copy(frame).invert();
           q.premultiply(spinQ).multiply(spinInv);
         }
         if (!rotValues.has(b.name)) rotValues.set(b.name, []);
@@ -588,6 +610,7 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
           LeftForeArm: [-elbow - 10 * DEG * amp * Math.max(0, s), 0, 0],
         },
         hipsOffset: [0, bob * height * Math.abs(c) - bob * height * 0.5, 0],
+        armFrames: true,
       };
     });
 
@@ -614,7 +637,40 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     };
   });
 
-  return [idle, walk, run, wave];
+  // Strike with the right hand: wind-up behind (torso turned back), a fast
+  // swing forward with the torso turning in, a short hold, then back to rest.
+  const strikeKey = (p: number, pts: Array<[number, number]>) => {
+    if (p <= pts[0][0]) return pts[0][1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [t0, v0] = pts[i];
+      const [t1, v1] = pts[i + 1];
+      if (p <= t1) {
+        const u = (p - t0) / (t1 - t0);
+        return v0 + (v1 - v0) * (u * u * (3 - 2 * u));
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+  const strike = build('Golpear', 1.2, 48, (p) => {
+    const k = (pts: Array<[number, number]>) => strikeKey(p, pts);
+    const yaw = k([[0, 0], [0.3, -28 * DEG], [0.45, 34 * DEG], [0.7, 30 * DEG], [1, 0]]);
+    return {
+      armFrames: true,
+      rot: {
+        Hips: [0, yaw * 0.3, 0],
+        Spine: [0, yaw * 0.5, 0],
+        Chest: [0, yaw, 0],
+        Head: [0, -yaw * 0.3, 0],
+        RightArm: [k([[0, 0], [0.3, -75 * DEG], [0.45, 70 * DEG], [0.7, 60 * DEG], [1, 0]]), 0, 0],
+        RightForeArm: [k([[0, -10 * DEG], [0.3, -80 * DEG], [0.45, -15 * DEG], [0.7, -20 * DEG], [1, -10 * DEG]]), 0, 0],
+        LeftArm: [k([[0, 0], [0.3, 20 * DEG], [0.45, -20 * DEG], [1, 0]]), 0, 0],
+        LeftUpLeg: [k([[0, 0], [0.3, -10 * DEG], [0.45, 25 * DEG], [0.7, 25 * DEG], [1, 0]]), 0, 0],
+        RightLeg: [k([[0, 0], [0.3, 25 * DEG], [0.45, 10 * DEG], [1, 0]]), 0, 0],
+      },
+    };
+  });
+
+  return [idle, walk, run, wave, strike];
 }
 
 export function clipNameForAnimation(id: string): string | null {

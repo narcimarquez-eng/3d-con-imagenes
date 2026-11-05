@@ -1642,6 +1642,7 @@ export default function App() {
                             ['walk', 'Caminar'],
                             ['run', 'Correr'],
                             ['wave', 'Saludar'],
+                            ['strike', 'Golpear'],
                           ].map(([id, label]) => (
                             <button
                               key={id}

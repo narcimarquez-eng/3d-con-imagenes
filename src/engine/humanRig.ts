@@ -458,6 +458,21 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
   const hipsPos = boneHead.get('Hips')!.head;
   const height = Math.max(0.5, boneHead.get('Head')!.tail[1] - Math.min(rig.bones.find((b) => b.name === 'RightFoot')!.tail[1], 0));
 
+  // Each leg swings in the plane its foot points to (Pose A: the feet are turned
+  // out), not in the world plane. The swing is rotated into that plane and back.
+  const legSpin = new Map<string, number>();
+  for (const prefix of ['Right', 'Left']) {
+    const foot = boneHead.get(`${prefix}Foot`);
+    if (!foot) continue;
+    const dx = foot.tail[0] - foot.head[0];
+    const dz = foot.tail[2] - foot.head[2];
+    const s = Math.max(-0.9, Math.min(0.9, Math.atan2(dx, dz))); // up to ~50°
+    for (const part of ['UpLeg', 'Leg', 'Foot']) legSpin.set(`${prefix}${part}`, s);
+  }
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const spinQ = new THREE.Quaternion();
+  const spinInv = new THREE.Quaternion();
+
   // Angle (around Z) that turns an arm from its rest direction to "raised up and out".
   const raiseAngle = (armName: string, side: -1 | 1) => {
     const b = boneHead.get(armName)!;
@@ -491,6 +506,12 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
         const r = rot[b.name] || [0, 0, 0];
         e.set(r[0], r[1], r[2], 'XYZ');
         q.setFromEuler(e);
+        const spin = legSpin.get(b.name);
+        if (spin) {
+          spinQ.setFromAxisAngle(yAxis, spin);
+          spinInv.copy(spinQ).invert();
+          q.premultiply(spinQ).multiply(spinInv);
+        }
         if (!rotValues.has(b.name)) rotValues.set(b.name, []);
         rotValues.get(b.name)!.push(q.x, q.y, q.z, q.w);
       }

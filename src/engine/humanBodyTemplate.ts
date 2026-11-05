@@ -19,6 +19,8 @@ export interface HumanBodyInputs {
   mask: Uint8Array;
   /** Tensor size (square). */
   w: number;
+  /** Front image RGB (0..1), size w*w*3. Used to find the eyes and chin. */
+  frontRgb?: Float32Array;
   /** Normalised photo relief of the front / back image, size w*w. */
   frontRelief: Float32Array;
   backRelief: Float32Array;
@@ -62,6 +64,16 @@ export interface HumanBodyLandmarks {
   shoulderY: number;
   armpitY: number;
   crotchY: number;
+  /** Face found in the image (texel coords), when detection is confident. */
+  face?: FaceFeatures;
+}
+
+export interface FaceFeatures {
+  eyeY: number;
+  chinY: number;
+  centerX: number;
+  /** Half the distance between the eyes. */
+  eyeHalfSpacing: number;
 }
 
 export interface HumanBodyStats {
@@ -287,9 +299,143 @@ function torsoDepthRatio(t: number): number {
 }
 
 /**
+ * Finds the eye line and the chin in the front image.
+ * - Eyes: the row where two dark spots sit symmetrically either side of the
+ *   face centre, darker than the brow above and the cheeks below.
+ * - Chin: going down from the eyes, where the skin colour (sampled under the
+ *   eyes) stops filling the lower face.
+ * Returns null when nothing convincing is found (the caller then falls back
+ * to proportions).
+ */
+function detectFace(
+  rgb: Float32Array,
+  mask: Uint8Array,
+  w: number,
+  top: number,
+  axisX: number,
+  skullW: number,
+  chinGuess: number,
+  shoulderY: number
+): FaceFeatures | null {
+  const half = skullW / 2;
+  const Hg = chinGuess - top;
+  if (half < 4 || Hg < 10) return null;
+  const lum = (x: number, y: number) => {
+    const xi = Math.max(0, Math.min(w - 1, Math.round(x)));
+    const yi = Math.max(0, Math.min(w - 1, Math.round(y)));
+    const i = (yi * w + xi) * 3;
+    return 0.299 * rgb[i] + 0.587 * rgb[i + 1] + 0.114 * rgb[i + 2];
+  };
+  // 3x3 mean luminance (smooths single dark pixels / outlines).
+  const lum3 = (x: number, y: number) => {
+    let s = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += lum(x + dx, y + dy);
+    return s / 9;
+  };
+
+  // --- Eye line -----------------------------------------------------------
+  let best = -Infinity;
+  let eyeY = -1;
+  let eyeLx = 0;
+  let eyeRx = 0;
+  const band = Math.max(2, Math.round(Hg * 0.12));
+  for (let y = Math.round(top + 0.35 * Hg); y <= Math.round(top + 0.8 * Hg); y++) {
+    const darkest = (side: -1 | 1) => {
+      let m = Infinity;
+      let mx = axisX;
+      for (let k = 0.12; k <= 0.6; k += 0.04) {
+        const x = axisX + side * k * half;
+        if (mask[Math.round(y) * w + Math.round(x)] !== 1) continue;
+        const l = lum3(x, y);
+        if (l < m) {
+          m = l;
+          mx = x;
+        }
+      }
+      return [m, mx];
+    };
+    const [dl, lx] = darkest(-1);
+    const [dr, rx] = darkest(1);
+    if (!Number.isFinite(dl) || !Number.isFinite(dr)) continue;
+    // Brow above and cheek below at the same columns.
+    const around =
+      (lum3(lx, y - band) + lum3(rx, y - band) + lum3(lx, y + band) + lum3(rx, y + band)) / 4;
+    const eyes = (dl + dr) / 2;
+    const symmetry = Math.abs(dl - dr) + Math.abs((axisX - lx) - (rx - axisX)) / half * 0.15;
+    const score = around - eyes - symmetry;
+    if (score > best) {
+      best = score;
+      eyeY = y;
+      eyeLx = lx;
+      eyeRx = rx;
+    }
+  }
+  if (eyeY < 0 || best < 0.035) return null;
+  const centerX = (eyeLx + eyeRx) / 2;
+  const eyeHalfSpacing = Math.max(half * 0.25, Math.min(half * 0.75, (eyeRx - eyeLx) / 2));
+
+  // --- Chin ---------------------------------------------------------------
+  // Skin colour: median-ish average below the eyes, between nose and cheeks.
+  let sr = 0, sg = 0, sb = 0, sn = 0;
+  for (let y = Math.round(eyeY + 0.12 * Hg); y <= Math.round(eyeY + 0.25 * Hg); y++) {
+    for (let x = Math.round(centerX - 0.35 * half); x <= Math.round(centerX + 0.35 * half); x++) {
+      if (mask[y * w + x] !== 1) continue;
+      const i = (y * w + x) * 3;
+      sr += rgb[i];
+      sg += rgb[i + 1];
+      sb += rgb[i + 2];
+      sn++;
+    }
+  }
+  if (sn < 4) return null;
+  sr /= sn;
+  sg /= sn;
+  sb /= sn;
+  const skinFraction = (y: number) => {
+    let hit = 0;
+    let n = 0;
+    for (let x = Math.round(centerX - 0.45 * half); x <= Math.round(centerX + 0.45 * half); x++) {
+      if (x < 0 || x >= w) continue;
+      n++;
+      const i = (y * w + x) * 3;
+      const dr = rgb[i] - sr;
+      const dg = rgb[i + 1] - sg;
+      const db = rgb[i + 2] - sb;
+      if (dr * dr + dg * dg + db * db < 0.018) hit++;
+    }
+    return n ? hit / n : 0;
+  };
+  let chinY = -1;
+  let seenSkin = false;
+  let miss = 0;
+  const yEnd = Math.min(w - 2, Math.max(shoulderY, chinGuess) + Math.round(0.35 * Hg));
+  for (let y = Math.round(eyeY + 0.2 * Hg); y <= yEnd; y++) {
+    const f = skinFraction(y);
+    if (f >= 0.45) {
+      seenSkin = true;
+      miss = 0;
+    } else if (seenSkin && f < 0.25) {
+      if (++miss >= 3) {
+        chinY = y - 3;
+        break;
+      }
+    } else {
+      miss = 0;
+    }
+  }
+  // Fallback: classic proportion from the eyes (eyes ~59% of the way from top to chin).
+  if (chinY < 0) chinY = Math.round(top + (eyeY - top) / 0.59);
+  // Sanity: the chin must sit a plausible distance below the eyes.
+  const minChin = eyeY + 0.25 * (eyeY - top);
+  const maxChin = eyeY + 1.1 * (eyeY - top);
+  chinY = Math.round(Math.max(minChin, Math.min(maxChin, chinY)));
+  return { eyeY, chinY, centerX, eyeHalfSpacing };
+}
+
+/**
  * Builds the half-thickness map (in texels) of a human body that fills the silhouette.
  */
-function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
+function buildHumanDepthMap(mask: Uint8Array, w: number, rgb?: Float32Array): HumanBodyLandmarks {
   distanceAndRadius(mask, w);
 
   // --- Landmarks -----------------------------------------------------------
@@ -327,21 +473,41 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
     return r ? r[1] - r[0] + 1 : 0;
   };
 
-  // Shoulders start where the body run becomes much wider than the head seen
-  // so far (the running maximum lets a head that widens gradually, e.g. from
-  // a narrow crest of hair, keep counting as head).
-  let shoulderY = top + Math.round(H * 0.2);
-  let headMax = 0;
-  for (let y = top; y <= top + Math.round(H * 0.3); y++) {
+  // Skull width from the top of the head (above ears and collars).
+  const skullWidths: number[] = [];
+  for (let y = top + Math.round(H * 0.025); y <= top + Math.round(H * 0.07); y++) {
     const wd = axisWidth(y);
-    if (y > top + H * 0.05 && headMax > 2 && wd > headMax * 1.6) {
-      shoulderY = y;
-      break;
+    if (wd > 0) skullWidths.push(wd);
+  }
+  skullWidths.sort((p, q) => p - q);
+  const skullW = skullWidths.length ? skullWidths[skullWidths.length >> 1] : H * 0.1;
+  // A head (hair/helmet included) is ~1.35 times as tall as its skull is wide.
+  // This also works when a collar or shoulder pads hide the neck outline.
+  const chinEstimate = top + Math.round(skullW * 1.35);
+
+  // Shoulders: below the head (never before one skull width from the top),
+  // where the body run becomes much wider than the head and stays so.
+  let shoulderY = Math.max(chinEstimate, top + Math.round(H * 0.12));
+  {
+    let headMax = 0;
+    let wideRows = 0;
+    for (let y = top; y <= top + Math.round(H * 0.32); y++) {
+      const wd = axisWidth(y);
+      const canStart = y >= top + skullW;
+      if (canStart && headMax > 2 && wd > headMax * 1.6) {
+        if (++wideRows >= 3) {
+          shoulderY = y - 2;
+          break;
+        }
+        continue;
+      }
+      wideRows = 0;
+      headMax = Math.max(headMax, Math.min(wd, skullW * 1.6));
     }
-    headMax = Math.max(headMax, wd);
   }
 
-  // Neck: narrowest axis run between the head and the shoulders.
+  // Neck: narrowest axis run between the head and the shoulders, but not
+  // above the chin estimated from the skull.
   let neckY = Math.max(top + 1, shoulderY - 1);
   let neckW = Infinity;
   for (let y = top + Math.round(H * 0.06); y < shoulderY; y++) {
@@ -351,19 +517,13 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
       neckY = y;
     }
   }
-
-  // Chin: a head (hair/helmet included) is ~1.35 times as tall as its skull is wide.
-  // This also works when a collar or shoulder pads hide the neck outline.
-  const skullWidths: number[] = [];
-  for (let y = top + Math.round(H * 0.025); y <= top + Math.round(H * 0.07); y++) {
-    const wd = axisWidth(y);
-    if (wd > 0) skullWidths.push(wd);
-  }
-  skullWidths.sort((p, q) => p - q);
-  const skullW = skullWidths.length ? skullWidths[skullWidths.length >> 1] : H * 0.1;
-  const chinEstimate = top + Math.round(skullW * 1.35);
-  neckY = Math.min(Math.max(neckY, chinEstimate), shoulderY);
+  neckY = Math.max(neckY, Math.min(chinEstimate, shoulderY));
   const headHalfMax = (skullW / 2) * 1.15;
+
+  // Eyes and chin read from the image, when they can be found.
+  const face = rgb ? detectFace(rgb, mask, w, top, axisX, skullW, chinEstimate, Math.max(shoulderY, chinEstimate)) : null;
+  if (face) neckY = Math.round(Math.max(face.chinY, top + skullW * 0.9));
+  if (face && shoulderY < neckY) shoulderY = neckY;
 
   // Crotch: top of the gap between the legs (on the body axis), but never lower
   // than an anatomical limit, so cloth hanging between the legs is not torso.
@@ -505,7 +665,7 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
   // Blend the parts together (head/neck, torso/legs, torso/arms) without seams.
   blur5(D, w, 3, mask);
 
-  return { top, bottom, axisX, neckY, shoulderY, armpitY, crotchY };
+  return { top, bottom, axisX, neckY, shoulderY, armpitY, crotchY, face: face ?? undefined };
 }
 
 /** Blurred mask whose 0.5 level is the smooth outline. */
@@ -560,7 +720,18 @@ function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBo
   halves.sort((p, q) => p - q);
   const half = halves.length ? halves[halves.length >> 1] : 0;
   if (nC === 0 || half < 3) return;
-  const cx = sumC / nC;
+  let cx = sumC / nC;
+  let faceHalf = half;
+  // Map rows so the eyes land at v = 0.565 and the chin at v = 0.95.
+  let vOf = (y: number) => (y - top) / Hh;
+  if (lm.face) {
+    const f = lm.face;
+    cx = f.centerX;
+    // Eyes sit at about u = ±0.32 of the face half-width.
+    faceHalf = Math.max(half * 0.7, Math.min(half * 1.25, f.eyeHalfSpacing / 0.32));
+    const span = Math.max(4, f.chinY - f.eyeY);
+    vOf = (y: number) => 0.565 + ((y - f.eyeY) / span) * (0.95 - 0.565);
+  }
 
   const g = (d: number, s: number) => Math.exp(-(d * d) / (2 * s * s));
   const g2 = (u: number, u0: number, su: number, v: number, v0: number, sv: number) => g(u - u0, su) * g(v - v0, sv);
@@ -570,15 +741,16 @@ function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBo
   };
 
   const y0 = Math.max(0, top);
-  const y1 = Math.min(w - 1, Math.round(chin + 0.06 * Hh));
-  const x0 = Math.max(0, Math.floor(cx - half));
-  const x1 = Math.min(w - 1, Math.ceil(cx + half));
+  const y1 = Math.min(w - 1, Math.round((lm.face ? lm.face.chinY : chin) + 0.06 * Hh));
+  const x0 = Math.max(0, Math.floor(cx - faceHalf));
+  const x1 = Math.min(w - 1, Math.ceil(cx + faceHalf));
   for (let y = y0; y <= y1; y++) {
-    const v = (y - top) / Hh;
+    const v = vOf(y);
+    if (v < 0.3 || v > 1.05) continue;
     for (let x = x0; x <= x1; x++) {
       const i = y * w + x;
       if (mask[i] !== 1) continue;
-      const u = (x - cx) / half;
+      const u = (x - cx) / faceHalf;
       let f = 0;
       // Nose: bridge rising towards the tip, tip, and the wings of the nostrils.
       f += 0.13 * g(u, 0.1) * smooth(0.52, 0.72, v) * (1 - smooth(0.74, 0.8, v));
@@ -598,7 +770,7 @@ function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBo
       f += 0.075 * g2(u, 0, 0.2, v, 0.95, 0.045);
       // Keep the edges of the head untouched.
       const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 3));
-      D[i] = Math.max(0, D[i] + f * half * amount * fade);
+      D[i] = Math.max(0, D[i] + f * faceHalf * amount * fade);
     }
   }
 }
@@ -769,7 +941,7 @@ export function buildHumanBodyTemplateGeometry(
   ensureBuffers(w);
 
   // The depth map is computed before the outline field because both use _tmp.
-  const landmarks = buildHumanDepthMap(mask, w);
+  const landmarks = buildHumanDepthMap(mask, w, inputs.frontRgb);
   if (inputs.atlas) {
     repairAtlasRim(inputs.atlas, mask, w);
     if (inputs.atlas.roughMetal) smoothRoughMetal(inputs.atlas.roughMetal, inputs.atlas.atlasWidth, mask, w);
@@ -1190,9 +1362,16 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
     const halfW = ((maxX - minX + 1) / 2) * texelWorld;
     const cx = toWX((minX + maxX) / 2);
     const soleY = toWY(lm.bottom + 0.5);
-    const height0 = 0.105 * H * texelWorld; // heel / ankle height
-    const length = 0.17 * H * texelWorld;
-    const heelZ = -halfW * 1.0;
+    // Normal foot proportions: length ~15.5% of the body height, ankle a
+    // quarter of the way from the heel, toe low and slightly pointed.
+    const length = 0.155 * H * texelWorld;
+    const footHalfW = Math.max(0.18 * length, Math.min(0.32 * length, halfW));
+    const height0 = 0.09 * H * texelWorld; // heel / ankle height
+    // The heel must still cover the back of the leg above it.
+    const heelZ = -Math.max(0.25 * length, halfW * 0.95);
+    // ...and the toe always reaches well past the front of the leg.
+    const toeZ = Math.max(0.75 * length, halfW * 0.9 + 0.45 * length);
+    const span = toeZ - heelZ;
 
     // Boot shape from a sphere: boxier section, flat sole, high heel side, low toe.
     const box = (v: number, e: number) => Math.sign(v) * Math.pow(Math.abs(v), e);
@@ -1206,12 +1385,15 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
       const uy = box(sp.getY(i), 0.5);
       const uz = box(sp.getZ(i), 0.7);
       const t = (uz + 1) / 2; // 0 = heel, 1 = toe
-      const toeT = Math.max(0, Math.min(1, (t - 0.35) / 0.65));
-      const hp = 1 - 0.58 * toeT * toeT * (3 - 2 * toeT);
-      const wp = 0.9 + 0.16 * Math.sin(Math.PI * Math.min(1, t * 1.1)) - 0.12 * toeT * toeT;
-      const X = cx + ux * halfW * 0.98 * wp;
+      const toeT = Math.max(0, Math.min(1, (t - 0.3) / 0.7));
+      const ts = toeT * toeT * (3 - 2 * toeT);
+      const hp = 1 - 0.62 * ts; // low toe
+      const wp = 0.92 + 0.14 * Math.sin(Math.PI * Math.min(1, t * 1.15)) - 0.3 * ts * ts; // narrower, pointed toe
+      // Keep the shaft wide enough around the leg, the forefoot follows foot proportions.
+      const sideHalf = halfW * (1 - ts) + footHalfW * 1.1 * ts;
+      const X = cx + ux * sideHalf * 0.98 * wp;
       const Y = soleY + ((uy + 1) / 2) * height0 * hp;
-      const Z = heelZ + t * length;
+      const Z = heelZ + t * span;
       pos[i * 3] = X;
       pos[i * 3 + 1] = Y;
       pos[i * 3 + 2] = Z;
@@ -1244,8 +1426,8 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
 }
 
 /** Debug helper: depth map (texels), core mask and landmarks for a silhouette. */
-export function debugHumanDepthMap(mask: Uint8Array, w: number) {
+export function debugHumanDepthMap(mask: Uint8Array, w: number, rgb?: Float32Array) {
   ensureBuffers(w);
-  const landmarks = buildHumanDepthMap(mask, w);
+  const landmarks = buildHumanDepthMap(mask, w, rgb);
   return { landmarks, depth: _depth.slice(), core: _coreMask.slice() };
 }

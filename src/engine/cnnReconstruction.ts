@@ -7337,6 +7337,7 @@ export function buildReconstructedMeshGeometry(
       {
         mask: buffers.texelCutoutMask,
         w: CNN_TENSOR_SIZE,
+        frontRgb: buffers.rgbInput,
         frontRelief: buffers.depthTensor,
         backRelief: buffers.backDepthTensor,
         vertexUsedMask: buffers.vertexCutoutMask,

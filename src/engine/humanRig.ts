@@ -199,7 +199,8 @@ export function computeHumanRig(
     const hipY = lm.crotchY - 0.03 * H;
     const ankleY = lm.bottom - 0.06 * H;
     const kneeY = (hipY + ankleY) / 2;
-    const footLen = 0.13 * H * texelWorld; // matches the shoe's toe
+    // Toe of a normal foot (15.5% of the height) with the ankle a quarter from the heel.
+    const footLen = 0.155 * 0.75 * H * texelWorld;
     return {
       hip: toWorld(legX(side, lm.crotchY + 0.03 * H), hipY),
       knee: toWorld(legX(side, kneeY), kneeY, 0.01 * H * texelWorld),

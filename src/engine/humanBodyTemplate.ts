@@ -57,8 +57,10 @@ export interface HumanBodyOptions {
   layerStrength?: number;
   /** Strength of the facial features (0 = none, 1 = subtle). */
   faceDetail?: number;
-  /** Add shoes (flat sole, toe forward). Default true. */
+  /** Full boots over the feet (flat sole, toe forward). Default false: they looked wrong on the sheets. */
   shoes?: boolean;
+  /** Small bump at the tips of the toes. Default true. */
+  toeCaps?: boolean;
 }
 
 export interface HumanBodyLandmarks {
@@ -1420,8 +1422,13 @@ export function buildHumanBodyTemplateGeometry(
     nor[v * 3 + 2] /= l;
   }
 
-  // 7) Shoes: one per leg, with a flat sole, the toe forward and the heel back.
-  const shoes = options.shoes === false ? [] : buildShoes(mask, w, landmarks, texelWorld);
+  // 7) Feet: no boots by default; a small bump at each toe tip (toeCaps).
+  // Full boots are only built with options.shoes = true.
+  const shoes = options.shoes === true
+    ? buildShoes(mask, w, landmarks, texelWorld, false)
+    : options.toeCaps === false
+      ? []
+      : buildShoes(mask, w, landmarks, texelWorld, true);
   let shoeVerts = 0;
   let shoeIdx = 0;
   for (const sh of shoes) {
@@ -1517,15 +1524,16 @@ interface ShoePart {
   height: number;
 }
 
-/**
- * Builds a shoe for each leg: an ellipsoid stretched along Z (toe forward,
- * heel back), lower towards the toe and cut flat at the sole. It is textured
- * with the front image of the boot and covers the end of the leg.
- */
 /** How far each foot is turned outwards from straight ahead (Pose A 55°: toes point out). */
 const FOOT_TURN_RAD = (40 * Math.PI) / 180;
 
-function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWorld: number): ShoePart[] {
+/**
+ * Builds one part per leg: an ellipsoid stretched along Z (toe forward, heel
+ * back), low towards the toe and cut flat at the sole. Full boots cover the
+ * whole foot; with `capsOnly` it is only a small bump at the tips of the toes.
+ * It is textured with the front image at the foot and turned with the foot.
+ */
+function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWorld: number, capsOnly: boolean): ShoePart[] {
   const H = lm.bottom - lm.top + 1;
   if (H < 20) return [];
   const ax = lm.axisX;
@@ -1576,14 +1584,19 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
     // Normal foot proportions: length ~15.5% of the body height, ankle a
     // quarter of the way from the heel, toe low and slightly pointed.
     const length = 0.155 * H * texelWorld;
-    const height0 = 0.09 * H * texelWorld; // heel / ankle height
     // The heel must still cover the back of the leg above it.
-    const heelZ = -Math.max(0.25 * length, halfW * 0.95);
+    const fullHeelZ = -Math.max(0.25 * length, halfW * 0.95);
     // ...and the toe always reaches well past the front of the leg.
     const toeZ = Math.max(0.75 * length, halfW * 0.9 + 0.45 * length);
-    const span = toeZ - heelZ;
-    // Ankle: the pivot for turning the boot outwards.
-    const pivotZ = heelZ + 0.25 * span;
+    // Ankle: the pivot for turning the foot outwards, from the full foot.
+    const pivotZ = fullHeelZ + 0.25 * (toeZ - fullHeelZ);
+    // Toe caps: the body's feet are flat in depth, so the toes are not in the
+    // depth map. The bump sits just in front of the leg end, where the toes are,
+    // and it is not turned (the feet are only turned in the texture).
+    const heelZ = capsOnly ? halfW * 0.2 : fullHeelZ;
+    const frontZ = capsOnly ? halfW * 0.9 + 0.03 * H * texelWorld : toeZ;
+    const span = frontZ - heelZ;
+    const height0 = (capsOnly ? 0.05 : 0.09) * H * texelWorld; // heel / ankle height
 
     // Boot shape from a sphere: boxier section, flat sole, high heel side, low toe.
     const box = (v: number, e: number) => Math.sign(v) * Math.pow(Math.abs(v), e);
@@ -1608,7 +1621,7 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
       // Turn the boot about the ankle so the toe points outwards, as the feet
       // do in the sheet (the image-left foot points left, the other one right).
       // The UVs above use the unturned position, so the texture still matches.
-      const a = side * FOOT_TURN_RAD;
+      const a = capsOnly ? 0 : side * FOOT_TURN_RAD;
       const dx = X - cx;
       const dz = Z - pivotZ;
       pos[i * 3] = cx + dx * Math.cos(a) + dz * Math.sin(a);

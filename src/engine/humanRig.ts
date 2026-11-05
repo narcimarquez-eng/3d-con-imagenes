@@ -415,7 +415,7 @@ export const RIG_ANIMATIONS = [
   { id: 'walk', label: 'Caminar' },
   { id: 'run', label: 'Correr' },
   { id: 'wave', label: 'Saludar' },
-  { id: 'strike', label: 'Golpear' },
+  { id: 'strike', label: 'Attack' },
   { id: 'jumpBite', label: 'JumpBite' },
   { id: 'hit', label: 'Hit' },
   { id: 'death', label: 'Death' },
@@ -654,7 +654,7 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     }
     return pts[pts.length - 1][1];
   };
-  const strike = build('Golpear', 1.2, 48, (p) => {
+  const strike = build('Attack', 1.2, 48, (p) => {
     const k = (pts: Array<[number, number]>) => strikeKey(p, pts);
     const yaw = k([[0, 0], [0.3, -28 * DEG], [0.45, 34 * DEG], [0.7, 30 * DEG], [1, 0]]);
     return {
@@ -675,7 +675,7 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
 
   // The enemy set of the world creator (Idle, Walk, Attack, JumpBite, Hit, Death),
   // with the same names and about the same durations. Idle, Walk and Attack are
-  // Reposo, Caminar and Golpear.
+  // Reposo, Caminar and Attack (the strike).
 
   // JumpBite: crouch, leap forward, bite (head and chest lunge), land and recover.
   const jumpBite = build('JumpBite', 1.85, 48, (p) => {

@@ -695,6 +695,49 @@ function addPhotoDetail(dst: Float32Array, base: Float32Array, relief: Float32Ar
   }
 }
 
+/**
+ * Floor shadows often join the feet with a thin strip along the ground.
+ * Between the two shins, columns whose silhouette near the floor is shorter
+ * than 3.5% of the figure height are treated as shadow and removed.
+ */
+function removeFloorBridge(mask: Uint8Array, w: number) {
+  let top = -1;
+  let bottom = -1;
+  for (let y = 0; y < w; y++) {
+    for (let x = 0; x < w; x++) {
+      if (mask[y * w + x] !== 1) continue;
+      if (top < 0) top = y;
+      bottom = y;
+      break;
+    }
+  }
+  if (top < 0) return;
+  const H = bottom - top + 1;
+  const shinY = Math.round(bottom - 0.13 * H);
+  const runs = rowRuns(mask, w, shinY);
+  if (runs.length < 2) return;
+  // The two runs closest to the image centre are the legs.
+  const cx = w / 2;
+  let left: Run | null = null;
+  let right: Run | null = null;
+  for (const r of runs) {
+    const c = (r[0] + r[1]) / 2;
+    if (c < cx && (!left || r[1] > left[1])) left = r;
+    if (c >= cx && (!right || r[0] < right[0])) right = r;
+  }
+  if (!left || !right || right[0] - left[1] < 3) return;
+  const y0 = Math.round(bottom - 0.1 * H);
+  const maxH = 0.035 * H;
+  for (let x = left[1] + 1; x < right[0]; x++) {
+    let count = 0;
+    for (let y = y0; y <= bottom; y++) if (mask[y * w + x] === 1) count++;
+    if (count > 0 && count < maxH) {
+      for (let y = y0; y <= bottom; y++) mask[y * w + x] = 0;
+    }
+  }
+  keepLargestComponent(mask, w);
+}
+
 /** Keeps only the largest 4-connected region of a mask (in place). */
 function keepLargestComponent(mask: Uint8Array, w: number) {
   const n = w * w;
@@ -1017,19 +1060,38 @@ export function buildHumanBodyTemplateGeometry(
   // the automatic cutout so thin parts it missed (horns, spikes) come back.
   let mask = inputs.mask;
   if (inputs.frontLayer || inputs.backLayer) {
-    mask = inputs.mask.slice();
+    // Painted pixels (front map, and the mirrored back map).
+    const painted = new Uint8Array(w * w);
     for (let y = 0; y < w; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        if (inputs.frontLayer && Number.isFinite(inputs.frontLayer.offset[i])) mask[i] = 1;
+        if (inputs.frontLayer && Number.isFinite(inputs.frontLayer.offset[i])) painted[i] = 1;
         const j = y * w + (w - 1 - x);
-        if (inputs.backLayer && Number.isFinite(inputs.backLayer.offset[j])) mask[i] = 1;
+        if (inputs.backLayer && Number.isFinite(inputs.backLayer.offset[j])) painted[i] = 1;
       }
     }
+    // The automatic cutout is only trusted within 2 px of the paint, which
+    // drops floor shadows or background it wrongly kept (e.g. between feet).
+    let near = painted.slice();
+    for (let r = 0; r < 2; r++) {
+      const prev = near;
+      near = prev.slice();
+      for (let y = 0; y < w; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (prev[i]) continue;
+          if ((x > 0 && prev[i - 1]) || (x < w - 1 && prev[i + 1]) || (y > 0 && prev[i - w]) || (y < w - 1 && prev[i + w])) near[i] = 1;
+        }
+      }
+    }
+    mask = new Uint8Array(w * w);
+    for (let i = 0; i < w * w; i++) mask[i] = painted[i] || (inputs.mask[i] && near[i]) ? 1 : 0;
     // Keep only what touches the main body (stray paint specks are dropped).
     keepLargestComponent(mask, w);
   }
   ensureBuffers(w);
+  if (mask === inputs.mask) mask = inputs.mask.slice();
+  removeFloorBridge(mask, w);
 
   // The depth map is computed before the outline field because both use _tmp.
   const landmarks = buildHumanDepthMap(mask, w, inputs.frontRgb);
@@ -1098,6 +1160,38 @@ export function buildHumanBodyTemplateGeometry(
       quadOn[j * qCols + i] =
         inside[a] && inside[a + 1] && inside[a + nCols] && inside[a + nCols + 1] ? 1 : 0;
     }
+  }
+
+  // Keep only the largest connected group of quads (drops tiny islands the
+  // smoothed outline can leave, e.g. a speck of floor shadow between the feet).
+  {
+    const comp = new Int32Array(quadOn.length).fill(-1);
+    const queue = new Int32Array(quadOn.length);
+    let best = -1;
+    let bestSize = 0;
+    let c = 0;
+    for (let q0 = 0; q0 < quadOn.length; q0++) {
+      if (!quadOn[q0] || comp[q0] >= 0) continue;
+      let qh = 0;
+      let qt = 0;
+      queue[qt++] = q0;
+      comp[q0] = c;
+      while (qh < qt) {
+        const q = queue[qh++];
+        const qi = q % qCols;
+        for (const nq of [qi > 0 ? q - 1 : -1, qi < qCols - 1 ? q + 1 : -1, q - qCols, q + qCols]) {
+          if (nq < 0 || nq >= quadOn.length || !quadOn[nq] || comp[nq] >= 0) continue;
+          comp[nq] = c;
+          queue[qt++] = nq;
+        }
+      }
+      if (qt > bestSize) {
+        bestSize = qt;
+        best = c;
+      }
+      c++;
+    }
+    for (let q = 0; q < quadOn.length; q++) if (quadOn[q] && comp[q] !== best) quadOn[q] = 0;
   }
 
   // Boundary edges -> neighbour links.
@@ -1438,31 +1532,45 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
   const toWY = (ty: number) => (0.5 - ty / (w - 1)) * WORLD_SPAN;
 
   for (const side of [-1, 1] as const) {
-    // Extent of this foot in the bottom rows.
-    let minX = Infinity;
-    let maxX = -Infinity;
-    for (let y = ankleY; y <= lm.bottom; y++) {
+    // Width of the leg just above the ankle (the shin). The bottom rows are
+    // not used: sandals, floor shadows or toes would make the foot too wide.
+    const halves: number[] = [];
+    const centers: number[] = [];
+    for (let y = Math.round(lm.bottom - 0.17 * H); y <= Math.round(lm.bottom - 0.1 * H); y++) {
       const runs = rowRuns(mask, w, y);
+      let best: [number, number] | null = null;
+      let bestD = Infinity;
       for (const [a, b] of runs) {
-        // Keep the part of the run on this side of the axis.
+        // A run spanning the axis holds both legs: keep this side's half.
         const lo = side < 0 ? a : Math.max(a, Math.ceil(ax));
         const hi = side < 0 ? Math.min(b, Math.floor(ax)) : b;
-        if (hi < lo) continue;
-        // Ignore runs far from the legs (e.g. a weapon on the floor).
-        if (Math.abs((lo + hi) / 2 - ax) > 0.3 * H) continue;
-        minX = Math.min(minX, lo);
-        maxX = Math.max(maxX, hi);
+        if (hi - lo < 1) continue;
+        const d = Math.abs((lo + hi) / 2 - ax);
+        if (d > 0.3 * H) continue;
+        if (d < bestD) {
+          bestD = d;
+          best = [lo, hi];
+        }
+      }
+      if (best) {
+        halves.push((best[1] - best[0] + 1) / 2);
+        centers.push((best[0] + best[1]) / 2);
       }
     }
-    if (!Number.isFinite(minX) || maxX - minX < 2) continue;
+    if (halves.length < 2) continue;
+    halves.sort((p, q) => p - q);
+    centers.sort((p, q) => p - q);
+    const legHalfTex = halves[halves.length >> 1];
+    const legCenterTex = centers[centers.length >> 1];
+    const minX = legCenterTex - legHalfTex;
+    const maxX = legCenterTex + legHalfTex;
 
-    const halfW = ((maxX - minX + 1) / 2) * texelWorld;
-    const cx = toWX((minX + maxX) / 2);
+    const halfW = legHalfTex * texelWorld;
+    const cx = toWX(legCenterTex);
     const soleY = toWY(lm.bottom + 0.5);
     // Normal foot proportions: length ~15.5% of the body height, ankle a
     // quarter of the way from the heel, toe low and slightly pointed.
     const length = 0.155 * H * texelWorld;
-    const footHalfW = Math.max(0.18 * length, Math.min(0.32 * length, halfW));
     const height0 = 0.09 * H * texelWorld; // heel / ankle height
     // The heel must still cover the back of the leg above it.
     const heelZ = -Math.max(0.25 * length, halfW * 0.95);
@@ -1485,10 +1593,9 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
       const toeT = Math.max(0, Math.min(1, (t - 0.3) / 0.7));
       const ts = toeT * toeT * (3 - 2 * toeT);
       const hp = 1 - 0.62 * ts; // low toe
-      const wp = 0.92 + 0.14 * Math.sin(Math.PI * Math.min(1, t * 1.15)) - 0.3 * ts * ts; // narrower, pointed toe
-      // Keep the shaft wide enough around the leg, the forefoot follows foot proportions.
-      const sideHalf = halfW * (1 - ts) + footHalfW * 1.1 * ts;
-      const X = cx + ux * sideHalf * 0.98 * wp;
+      const wp = 0.94 + 0.06 * Math.sin(Math.PI * Math.min(1, t * 1.15)) - 0.3 * ts * ts; // never wider than the leg, pointed toe
+      // As wide as the leg; the forefoot narrows slightly towards the toe.
+      const X = cx + ux * halfW * wp;
       const Y = soleY + ((uy + 1) / 2) * height0 * hp;
       const Z = heelZ + t * span;
       pos[i * 3] = X;

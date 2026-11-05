@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildHumanBodyTemplateGeometry } from './humanBodyTemplate';
 import {
   BackImageSourceMode,
   BackgroundCutoutMode,
@@ -7321,6 +7322,48 @@ export function buildReconstructedMeshGeometry(
 
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
+
+  // Human body template: replace the relief mesh with a closed human body fitted
+  // to the silhouette (the atlas textures written above are reused as they are).
+  if (
+    params.humanBodyTemplate !== false &&
+    presetShape === PresetBaseShape.HumanoidAPose &&
+    params.topology === MathTopology.MonolithRelief
+  ) {
+    const body = buildHumanBodyTemplateGeometry(
+      geometry,
+      {
+        mask: buffers.texelCutoutMask,
+        w: CNN_TENSOR_SIZE,
+        frontRelief: buffers.depthTensor,
+        backRelief: buffers.backDepthTensor,
+        vertexUsedMask: buffers.vertexCutoutMask,
+        maxVertices: CNNReconstructionBuffers.MAX_VERTICES,
+        atlas: {
+          albedo: albData,
+          atlasWidth: atlasW,
+          background: [buffers.autoDetectedBgR, buffers.autoDetectedBgG, buffers.autoDetectedBgB],
+          backBackground: buffers.hasCustomBackImage
+            ? [buffers.backAutoBgR, buffers.backAutoBgG, buffers.backAutoBgB]
+            : undefined,
+        },
+      },
+      {
+        depthScale: Math.max(0.2, Math.min(1.8, params.humanBodyDepth ?? 1.0)),
+        reliefAmount: Math.max(0.0, Math.min(1.0, params.humanReliefDetail ?? 0.5)),
+        rows: Math.round(Math.max(32, Math.min(144, params.gridResolution)) * 1.6),
+      }
+    );
+    return {
+      elapsedMs: performance.now() - t0,
+      poissonSolveMs,
+      vertexCount: body.vertexCount,
+      weldedVerticesCount: 0,
+      cutoutTrianglesRemoved: 0,
+      stitchedSideFacesCount: 0,
+      triangleCount: body.triangleCount,
+    };
+  }
 
   return {
     elapsedMs: performance.now() - t0,

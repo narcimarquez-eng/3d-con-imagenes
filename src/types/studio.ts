@@ -146,6 +146,9 @@ export interface ReconstructionParams {
   shapeOffsetX: number; // -0.35 to +0.35 horizontal center offset
   shapeOffsetY: number; // -0.35 to +0.35 vertical center offset
   seamlessBorderSmoothing: number; // 0.0 to 1.0 makes the border union between Front & Back disappear via cross-shell smoothing
+  humanBodyTemplate?: boolean; // fit a closed human body to the silhouette (Humanoid A-pose mold)
+  humanBodyDepth?: number; // 0.2..1.8 body depth multiplier for the human template
+  humanReliefDetail?: number; // 0..1 photo relief added on top of the human template
   silhouetteInflation?: number; // 0..1.5 rounded volume from the outline (0.75 ≈ elliptical human cross-section)
   contourSnapStrength?: number; // 0..1 how strongly border vertices follow the real outline (anti saw-tooth)
   reliefEdgeSmoothing?: number; // 0..1 edge-aware smoothing of the photo relief (removes lumps, keeps plate edges)

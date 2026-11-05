@@ -520,6 +520,9 @@ export default function App() {
     shapeOffsetY: 0.0,
     seamlessBorderSmoothing: 0.92,
     seamlessBorderWidth: 8.5,
+    humanBodyTemplate: true,
+    humanBodyDepth: 1.0,
+    humanReliefDetail: 0.5,
     silhouetteInflation: 0.75,
     contourSnapStrength: 1.0,
     reliefEdgeSmoothing: 0.7,
@@ -1293,6 +1296,65 @@ export default function App() {
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
                   {/* Left 7 Cols: Preset 3D Base Shape Selector Grid */}
                   <div className="lg:col-span-7 flex flex-col justify-between border-r border-slate-800/80 pr-4">
+                    {/* Human body template fitted to the drawing's silhouette */}
+                    <div className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-2.5">
+                      <label className="flex items-center gap-2 text-xs font-semibold text-emerald-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={params.humanBodyTemplate !== false}
+                          onChange={(e) =>
+                            setParams((p) => ({ ...p, humanBodyTemplate: e.target.checked }))
+                          }
+                        />
+                        Cuerpo humano ajustado a la silueta (con molde Humano Pose A)
+                      </label>
+                      <p className="text-[11px] text-slate-400 mt-0.5 mb-2">
+                        Construye un cuerpo cerrado (cabeza, torso, brazos y piernas con proporciones humanas) que sigue
+                        exactamente el contorno del dibujo, y le aplica la imagen de frente y de espalda. Sin juntas laterales.
+                      </p>
+                      <div className="flex flex-wrap gap-4">
+                        <div className="flex-1 min-w-[160px]">
+                          <div className="flex justify-between text-[11px] mb-0.5">
+                            <span className="text-slate-400">Profundidad del cuerpo</span>
+                            <span className="font-mono text-slate-200 tabular-nums">
+                              {(params.humanBodyDepth ?? 1.0).toFixed(2)}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.4}
+                            max={1.6}
+                            step={0.05}
+                            value={params.humanBodyDepth ?? 1.0}
+                            disabled={params.humanBodyTemplate === false}
+                            onChange={(e) =>
+                              setParams((p) => ({ ...p, humanBodyDepth: parseFloat(e.target.value) }))
+                            }
+                            className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-[160px]">
+                          <div className="flex justify-between text-[11px] mb-0.5">
+                            <span className="text-slate-400">Relieve de la imagen</span>
+                            <span className="font-mono text-slate-200 tabular-nums">
+                              {(params.humanReliefDetail ?? 0.5).toFixed(2)}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={params.humanReliefDetail ?? 0.5}
+                            disabled={params.humanBodyTemplate === false}
+                            onChange={(e) =>
+                              setParams((p) => ({ ...p, humanReliefDetail: parseFloat(e.target.value) }))
+                            }
+                            className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
+                          />
+                        </div>
+                      </div>
+                    </div>
                     <div>
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                         <div>

@@ -1,6 +1,6 @@
 ---
 name: personaje-3d-desde-imagenes
-description: Convierte imágenes de un personaje (frente + espalda, opcionalmente con mapas de capas pintados) en un modelo 3D .glb con la app Vortex3D de este repositorio, incluyendo cuerpo humano ajustado a la silueta, cara, botas, esqueleto y animaciones. Úsala cuando el usuario quiera generar, probar o mejorar un .glb a partir de imágenes, procesar una hoja de referencia, pintar o interpretar un mapa de capas, o tocar el motor de reconstrucción (humanBodyTemplate, humanRig, layerMap, exportación GLB).
+description: Convierte imágenes de un personaje (frente + espalda, opcionalmente con mapas de capas pintados) en un modelo 3D .glb con la app Vortex3D de este repositorio, incluyendo cuerpo humano ajustado a la silueta, cara, esqueleto y animaciones. Úsala cuando el usuario quiera generar, probar o mejorar un .glb a partir de imágenes, procesar una hoja de referencia, pintar o interpretar un mapa de capas, o tocar el motor de reconstrucción (humanBodyTemplate, humanRig, layerMap, exportación GLB).
 ---
 
 # Personaje 3D desde imágenes (Vortex3D)
@@ -21,7 +21,7 @@ Todo se ejecuta desde la raíz del repo. Los scripts están en `.claude/skills/p
 5. Revisa el resultado (siempre, antes de enseñarlo):
    `node scripts/render_glb.cjs --glb modelo.glb --out renders/m --clay --head --anims`
    Mira `*_grid.png` (con textura), `*_clay_grid.png` (geometría en gris: es la que delata los fallos de forma), `*_head.png` y `*_anims.png`.
-6. `python3 scripts/inspect_glb.py modelo.glb --atlas atlas.png` da huesos, animaciones y piezas de malla. Lo normal son 4 piezas: frente y espalda del cuerpo (se cuentan aparte porque los vértices del contorno están duplicados por las UV) y una por bota. Una pieza pequeña extra es una isla flotante, o sea, un fallo.
+6. `python3 scripts/inspect_glb.py modelo.glb --atlas atlas.png` da huesos, animaciones y piezas de malla. Lo normal son 2 piezas: frente y espalda del cuerpo (se cuentan aparte porque los vértices del contorno están duplicados por las UV). Cualquier pieza extra pequeña es una isla flotante, o sea, un fallo.
 7. Para enseñar resultados: compón imágenes antes/después y envíalas junto con el .glb.
 
 El visor neutro no tiene mapa de entorno, así que el metal sale más oscuro que en la app. Para juzgar la forma, usa la vista en gris.
@@ -49,7 +49,7 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 
 - `src/App.tsx`: interfaz. `drawImageFittedToTensor` recorta la imagen al personaje y la encaja **sin deformar** en el cuadrado de 256×256 (rellena con el color de fondo de la imagen) y devuelve el recorte; `loadLayerMapIntoBuffers` aplica ese mismo recorte al mapa, sin suavizado. Los paneles nuevos están en la pestaña Moldes (cuerpo humano, rasgos de la cara, mapa de capas, esqueleto y animaciones) y en Suavizado (inflado, contorno suave, suavizado de relieve: solo afectan al modo antiguo).
 - `src/engine/cnnReconstruction.ts`: motor original (relieve a partir del brillo, Poisson, atlas de texturas 512: frente en el cuadrante de arriba a la izquierda, espalda arriba a la derecha). Al final de `buildReconstructedMeshGeometry`, si el molde es **Humano Pose A** y `humanBodyTemplate !== false`, sustituye la malla por la del cuerpo humano (reutiliza el atlas).
-- `src/engine/humanBodyTemplate.ts`: **cuerpo humano** cerrado ajustado a la silueta. Ahí están los puntos de referencia, el mapa de profundidad por partes, la cara, las botas, la reparación del borde del atlas, la malla y las islas.
+- `src/engine/humanBodyTemplate.ts`: **cuerpo humano** cerrado ajustado a la silueta. Ahí están los puntos de referencia, el mapa de profundidad por partes, la cara, la reparación del borde del atlas, la malla y las islas.
 - `src/engine/humanRig.ts`: esqueleto de 19 huesos con nombres estándar (Hips, Spine, Chest, Neck, Head, Left/Right Shoulder, Arm, ForeArm, Hand, UpLeg, Leg, Foot; izquierda y derecha son las del personaje), pesos de piel y animaciones procedurales (Reposo, Caminar, Correr, Saludar).
 - `src/engine/layerMap.ts`: paleta y clasificación de los mapas de capas.
 - `src/engine/exportEngine.ts`: exportación a GLB (convierte las DataTextures a canvas, quita la rotación de exhibición del visor, clona con SkeletonUtils, deja los huesos en pose de reposo e incluye las animaciones).
@@ -79,9 +79,8 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
    - Los vértices del borde se ajustan al contorno real con precisión de subpíxel y se suaviza la línea del contorno.
    - Frente y espalda se unen **directamente en el contorno**, sin tira de junta, con normales compartidas.
    - Solo se conserva el trozo conectado más grande.
-6. **Pies (sin botas por defecto)**: `buildShoes` ya no hace botas salvo que pongas `options.shoes = true`. Por defecto sale un **pequeño saliente redondeado en la punta de los dedos**, uno por pie (`options.toeCaps`, activo por defecto; `false` lo quita). Va unido al pie: el ancho es el de la pierna, la altura es el 5% de la altura del personaje, empieza dentro del extremo de la pierna y sobresale delante, y no se gira (el cuerpo tiene los pies planos en profundidad, así que los dedos no están en el mapa de profundidad). Las **botas completas** (`shoes = true`) miden el 15,5% de la altura, con el ancho de la pierna, y se giran `FOOT_TURN_RAD` (40°) hacia fuera alrededor del tobillo, porque las hojas de Pose A 55° dibujan los pies abiertos (si la hoja los tiene de frente, pon `FOOT_TURN_RAD = 0`). Mide el ángulo en la hoja: la longitud del pie proyectada en x es L·sen(θ). La textura sigue usando la posición sin girar, así que no se desplaza.
-7. **Textura**: el borde del atlas se repara (fondo y grises de mezcla dentro de una banda de 6 px se rellenan con el color del cuerpo; la espalda es más estricta) y las UV del borde se desplazan un poco hacia dentro. El mapa de metal y rugosidad se difumina para quitar chispas.
-8. **Sombras del suelo**: sin mapa, las franjas finas pegadas al suelo entre las piernas (de menos del 3,5% de la altura) se eliminan, porque si no se estiran al caminar.
+6. **Textura**: el borde del atlas se repara (fondo y grises de mezcla dentro de una banda de 6 px se rellenan con el color del cuerpo; la espalda es más estricta) y las UV del borde se desplazan un poco hacia dentro. El mapa de metal y rugosidad se difumina para quitar chispas.
+7. **Sombras del suelo**: sin mapa, las franjas finas pegadas al suelo entre las piernas (de menos del 3,5% de la altura) se eliminan, porque si no se estiran al caminar.
 
 ## Lecciones (errores ya resueltos; no reintroducirlos)
 
@@ -94,8 +93,6 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 - **Índices de fila:** redondéalos siempre (un `neckY` con decimales rompió `runsByRow`).
 - **Pruebas sin navegador:** pueden engañar si el recorte no es idéntico al de la app; para datos fiables, lee los resultados desde la app.
 - **Animación Saludar:** la hombrera se queda en su sitio y la axila se estira. Es una limitación conocida.
-- **Botas con cola o pelaje entre las piernas (lobo, 5.jpg):** la detección de la pierna toma la cola y las dos piernas como una sola franja, así que las botas se centran entre las patas y quedan flotando debajo. Síntoma: en la vista en gris las botas son dos bultos sueltos bajo el cuerpo. Corregido en `buildShoes`: la pierna de cada lado es la franja **más alejada del eje** en las filas del tobillo; la cola y el pelaje quedan más cerca del centro y ya no cuentan. Si aun así las botas quedan sueltas, mira la vista en gris. Los pies ya dibujados (garras, pezuñas) no necesitan botas: el motor tiene `options.shoes = false`, pero la app y `export_glb.cjs` aún no lo exponen.
-- **Medir el giro de las botas:** si la hoja tiene los pies abiertos, comprueba también la vista en gris desde arriba; las puntas deben apuntar hacia fuera y no quedar hundidas en el otro pie.
 
 ## Pruebas y entrega
 

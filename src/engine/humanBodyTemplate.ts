@@ -57,10 +57,6 @@ export interface HumanBodyOptions {
   layerStrength?: number;
   /** Strength of the facial features (0 = none, 1 = subtle). */
   faceDetail?: number;
-  /** Full boots over the feet (flat sole, toe forward). Default false: they looked wrong on the sheets. */
-  shoes?: boolean;
-  /** Small bump at the tips of the toes. Default true. */
-  toeCaps?: boolean;
 }
 
 export interface HumanBodyLandmarks {
@@ -1422,44 +1418,17 @@ export function buildHumanBodyTemplateGeometry(
     nor[v * 3 + 2] /= l;
   }
 
-  // 7) Feet: no boots by default; a small bump at each toe tip (toeCaps).
-  // Full boots are only built with options.shoes = true.
-  const shoes = options.shoes === true
-    ? buildShoes(mask, w, landmarks, texelWorld, false)
-    : options.toeCaps === false
-      ? []
-      : buildShoes(mask, w, landmarks, texelWorld, true);
-  let shoeVerts = 0;
-  let shoeIdx = 0;
-  for (const sh of shoes) {
-    shoeVerts += sh.pos.length / 3;
-    shoeIdx += sh.index.length;
-  }
-  const total = vCount + shoeVerts;
-  if (total > inputs.maxVertices) shoes.length = 0;
-  const allCount = shoes.length ? total : vCount;
+  // 7) Mesh: the body only (feet are flat; no boots or toe caps).
+  const allCount = vCount;
   const P = new Float32Array(allCount * 3);
   const N = new Float32Array(allCount * 3);
   const U = new Float32Array(allCount * 2);
   const C = new Float32Array(allCount * 3).fill(1);
-  const I = new Uint32Array(ip + (shoes.length ? shoeIdx : 0));
+  const I = new Uint32Array(ip);
   P.set(pos);
   N.set(nor);
   U.set(uv);
   I.set(index.subarray(0, ip));
-  let vb = vCount;
-  let ib = ip;
-  const shoeRanges: Array<{ start: number; count: number; side: -1 | 1; soleY: number; height: number }> = [];
-  for (const sh of shoes) {
-    const n = sh.pos.length / 3;
-    P.set(sh.pos, vb * 3);
-    N.set(sh.nor, vb * 3);
-    U.set(sh.uv, vb * 2);
-    for (let k = 0; k < sh.index.length; k++) I[ib + k] = sh.index[k] + vb;
-    shoeRanges.push({ start: vb, count: n, side: sh.side, soleY: sh.soleY, height: sh.height });
-    vb += n;
-    ib += sh.index.length;
-  }
 
   // Skeleton + skin weights (optional).
   let rig: HumanRig | undefined;
@@ -1476,21 +1445,6 @@ export function buildHumanBodyTemplateGeometry(
       for (let k = 0; k < 4; k++) {
         skinIndex[b * 4 + k] = skinIndex[f * 4 + k];
         skinWeight[b * 4 + k] = skinWeight[f * 4 + k];
-      }
-    }
-    // Shoes follow the foot, blending into the shin at the top.
-    const boneIndex = (name: string) => Math.max(0, rig!.bones.findIndex((b) => b.name === name));
-    for (const r of shoeRanges) {
-      const sideName = r.side < 0 ? 'Right' : 'Left';
-      const foot = boneIndex(`${sideName}Foot`);
-      const leg = boneIndex(`${sideName}Leg`);
-      for (let v = r.start; v < r.start + r.count; v++) {
-        const t = (P[v * 3 + 1] - r.soleY) / Math.max(1e-6, r.height);
-        const wLeg = Math.max(0, Math.min(0.5, (t - 0.55) * 1.2));
-        skinIndex[v * 4] = foot;
-        skinWeight[v * 4] = 1 - wLeg;
-        skinIndex[v * 4 + 1] = leg;
-        skinWeight[v * 4 + 1] = wLeg;
       }
     }
     geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
@@ -1512,147 +1466,6 @@ export function buildHumanBodyTemplateGeometry(
   geometry.computeBoundingSphere();
 
   return { vertexCount: allCount, triangleCount: I.length / 3, landmarks, rig };
-}
-
-interface ShoePart {
-  side: -1 | 1;
-  pos: Float32Array;
-  nor: Float32Array;
-  uv: Float32Array;
-  index: Uint32Array;
-  soleY: number;
-  height: number;
-}
-
-/** How far each foot is turned outwards from straight ahead (Pose A 55°: toes point out). */
-const FOOT_TURN_RAD = (40 * Math.PI) / 180;
-
-/**
- * Builds one part per leg: an ellipsoid stretched along Z (toe forward, heel
- * back), low towards the toe and cut flat at the sole. Full boots cover the
- * whole foot; with `capsOnly` it is only a small bump at the tips of the toes.
- * It is textured with the front image at the foot and turned with the foot.
- */
-function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWorld: number, capsOnly: boolean): ShoePart[] {
-  const H = lm.bottom - lm.top + 1;
-  if (H < 20) return [];
-  const ax = lm.axisX;
-  const ankleY = Math.round(lm.bottom - 0.075 * H);
-  const parts: ShoePart[] = [];
-  const toWX = (tx: number) => (tx / (w - 1) - 0.5) * WORLD_SPAN;
-  const toWY = (ty: number) => (0.5 - ty / (w - 1)) * WORLD_SPAN;
-
-  for (const side of [-1, 1] as const) {
-    // Width of the leg just above the ankle (the shin). The bottom rows are
-    // not used: sandals, floor shadows or toes would make the foot too wide.
-    const halves: number[] = [];
-    const centers: number[] = [];
-    for (let y = Math.round(lm.bottom - 0.17 * H); y <= Math.round(lm.bottom - 0.1 * H); y++) {
-      const runs = rowRuns(mask, w, y);
-      let best: [number, number] | null = null;
-      let bestD = -Infinity;
-      for (const [a, b] of runs) {
-        // A run spanning the axis holds both legs: keep this side's half.
-        const lo = side < 0 ? a : Math.max(a, Math.ceil(ax));
-        const hi = side < 0 ? Math.min(b, Math.floor(ax)) : b;
-        if (hi - lo < 1) continue;
-        const d = Math.abs((lo + hi) / 2 - ax);
-        if (d > 0.3 * H) continue;
-        // The leg is the outermost run on this side: a tail or fur hanging
-        // between the legs gives runs nearer the axis, which must not win.
-        if (d > bestD) {
-          bestD = d;
-          best = [lo, hi];
-        }
-      }
-      if (best) {
-        halves.push((best[1] - best[0] + 1) / 2);
-        centers.push((best[0] + best[1]) / 2);
-      }
-    }
-    if (halves.length < 2) continue;
-    halves.sort((p, q) => p - q);
-    centers.sort((p, q) => p - q);
-    const legHalfTex = halves[halves.length >> 1];
-    const legCenterTex = centers[centers.length >> 1];
-    const minX = legCenterTex - legHalfTex;
-    const maxX = legCenterTex + legHalfTex;
-
-    const halfW = legHalfTex * texelWorld;
-    const cx = toWX(legCenterTex);
-    const soleY = toWY(lm.bottom + 0.5);
-    // Normal foot proportions: length ~15.5% of the body height, ankle a
-    // quarter of the way from the heel, toe low and slightly pointed.
-    const length = 0.155 * H * texelWorld;
-    // The heel must still cover the back of the leg above it.
-    const fullHeelZ = -Math.max(0.25 * length, halfW * 0.95);
-    // ...and the toe always reaches well past the front of the leg.
-    const toeZ = Math.max(0.75 * length, halfW * 0.9 + 0.45 * length);
-    // Ankle: the pivot for turning the foot outwards, from the full foot.
-    const pivotZ = fullHeelZ + 0.25 * (toeZ - fullHeelZ);
-    // Toe caps: the body's feet are flat in depth, so the toes are not in the
-    // depth map. The bump sits just in front of the leg end, where the toes are,
-    // and it is not turned (the feet are only turned in the texture).
-    const heelZ = capsOnly ? halfW * 0.2 : fullHeelZ;
-    const frontZ = capsOnly ? halfW * 0.9 + 0.03 * H * texelWorld : toeZ;
-    const span = frontZ - heelZ;
-    const height0 = (capsOnly ? 0.05 : 0.09) * H * texelWorld; // heel / ankle height
-
-    // Boot shape from a sphere: boxier section, flat sole, high heel side, low toe.
-    const box = (v: number, e: number) => Math.sign(v) * Math.pow(Math.abs(v), e);
-    const sphere = new THREE.SphereGeometry(1, 32, 20);
-    const sp = sphere.getAttribute('position') as THREE.BufferAttribute;
-    const n = sp.count;
-    const pos = new Float32Array(n * 3);
-    const uv = new Float32Array(n * 2);
-    for (let i = 0; i < n; i++) {
-      const ux = box(sp.getX(i), 0.55);
-      const uy = box(sp.getY(i), 0.5);
-      const uz = box(sp.getZ(i), 0.7);
-      const t = (uz + 1) / 2; // 0 = heel, 1 = toe
-      const toeT = Math.max(0, Math.min(1, (t - 0.3) / 0.7));
-      const ts = toeT * toeT * (3 - 2 * toeT);
-      const hp = 1 - 0.62 * ts; // low toe
-      const wp = 0.94 + 0.06 * Math.sin(Math.PI * Math.min(1, t * 1.15)) - 0.3 * ts * ts; // never wider than the leg, pointed toe
-      // As wide as the leg; the forefoot narrows slightly towards the toe.
-      const X = cx + ux * halfW * wp;
-      const Y = soleY + ((uy + 1) / 2) * height0 * hp;
-      const Z = heelZ + t * span;
-      // Turn the boot about the ankle so the toe points outwards, as the feet
-      // do in the sheet (the image-left foot points left, the other one right).
-      // The UVs above use the unturned position, so the texture still matches.
-      const a = capsOnly ? 0 : side * FOOT_TURN_RAD;
-      const dx = X - cx;
-      const dz = Z - pivotZ;
-      pos[i * 3] = cx + dx * Math.cos(a) + dz * Math.sin(a);
-      pos[i * 3 + 1] = Y;
-      pos[i * 3 + 2] = pivotZ - dx * Math.sin(a) + dz * Math.cos(a);
-      // Front projection of the boot, kept inside the foot's own pixels.
-      const tx = Math.max(minX + 1, Math.min(maxX - 1, (X / WORLD_SPAN + 0.5) * (w - 1)));
-      const ty = Math.max(ankleY - 0.06 * H, Math.min(lm.bottom - 1.5, (0.5 - Y / WORLD_SPAN) * (w - 1)));
-      uv[i * 2] = 0.002 + (tx / (w - 1)) * 0.495;
-      uv[i * 2 + 1] = 0.002 + (ty / (w - 1)) * 0.495;
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setIndex(sphere.getIndex());
-    g.computeVertexNormals();
-    const idx = sphere.getIndex()!;
-    const index = new Uint32Array(idx.count);
-    for (let k = 0; k < idx.count; k++) index[k] = idx.getX(k);
-    parts.push({
-      side,
-      pos,
-      nor: (g.getAttribute('normal') as THREE.BufferAttribute).array as Float32Array,
-      uv,
-      index,
-      soleY,
-      height: height0,
-    });
-    sphere.dispose();
-    g.dispose();
-  }
-  return parts;
 }
 
 /** Debug helper: depth map (texels), core mask and landmarks for a silhouette. */

@@ -1532,21 +1532,42 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
   const toWY = (ty: number) => (0.5 - ty / (w - 1)) * WORLD_SPAN;
 
   for (const side of [-1, 1] as const) {
-    // Width of the leg just above the ankle (the shin). The bottom rows are
-    // not used: sandals, floor shadows or toes would make the foot too wide.
-    const halves: number[] = [];
-    const centers: number[] = [];
-    for (let y = Math.round(lm.bottom - 0.17 * H); y <= Math.round(lm.bottom - 0.1 * H); y++) {
-      const runs = rowRuns(mask, w, y);
-      let best: [number, number] | null = null;
-      let bestD = Infinity;
-      for (const [a, b] of runs) {
-        // A run spanning the axis holds both legs: keep this side's half.
+    // This side's runs of a row, cut at the body axis.
+    const sideRuns = (y: number): [number, number][] => {
+      const out: [number, number][] = [];
+      for (const [a, b] of rowRuns(mask, w, y)) {
         const lo = side < 0 ? a : Math.max(a, Math.ceil(ax));
         const hi = side < 0 ? Math.min(b, Math.floor(ax)) : b;
         if (hi - lo < 1) continue;
-        const d = Math.abs((lo + hi) / 2 - ax);
-        if (d > 0.3 * H) continue;
+        if (Math.abs((lo + hi) / 2 - ax) > 0.3 * H) continue;
+        out.push([lo, hi]);
+      }
+      return out;
+    };
+    // 1) Find the foot at the floor: the widest run on this side in the
+    // bottom rows. A robe panel hanging between the legs or a cape edge is
+    // thinner there, so it does not win.
+    const footCenters: number[] = [];
+    for (let y = Math.round(lm.bottom - 0.06 * H); y <= Math.round(lm.bottom - 0.01 * H); y++) {
+      let best: [number, number] | null = null;
+      for (const r of sideRuns(y)) if (!best || r[1] - r[0] > best[1] - best[0]) best = r;
+      if (best) footCenters.push((best[0] + best[1]) / 2);
+    }
+    footCenters.sort((p, q) => p - q);
+    const footX = footCenters.length ? footCenters[footCenters.length >> 1] : null;
+
+    // 2) Width of the leg just above the ankle (the shin), taken from the run
+    // right above the foot. The bottom rows are not used for the width:
+    // sandals, floor shadows or toes would make the foot too wide.
+    const halves: number[] = [];
+    const centers: number[] = [];
+    for (let y = Math.round(lm.bottom - 0.17 * H); y <= Math.round(lm.bottom - 0.1 * H); y++) {
+      let best: [number, number] | null = null;
+      let bestD = Infinity;
+      for (const [lo, hi] of sideRuns(y)) {
+        const ref = footX ?? ax;
+        // Distance from the foot (0 when the run contains it).
+        const d = footX !== null ? Math.max(0, lo - ref, ref - hi) : Math.abs((lo + hi) / 2 - ax);
         if (d < bestD) {
           bestD = d;
           best = [lo, hi];
@@ -1558,8 +1579,16 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
       }
     }
     if (halves.length < 2) continue;
-    halves.sort((p, q) => p - q);
-    centers.sort((p, q) => p - q);
+    // Rows where a cape or skirt joins the leg are much wider: drop them.
+    const sortedHalves = [...halves].sort((p, q) => p - q);
+    const narrow = sortedHalves[Math.floor(sortedHalves.length / 4)];
+    const keep = halves.map((h) => h <= 1.4 * narrow);
+    const keptHalves = halves.filter((_, k) => keep[k]);
+    const keptCenters = centers.filter((_, k) => keep[k]);
+    halves.length = 0;
+    centers.length = 0;
+    halves.push(...keptHalves.sort((p, q) => p - q));
+    centers.push(...keptCenters.sort((p, q) => p - q));
     const legHalfTex = halves[halves.length >> 1];
     const legCenterTex = centers[centers.length >> 1];
     const minX = legCenterTex - legHalfTex;

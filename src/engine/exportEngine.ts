@@ -166,13 +166,95 @@ export function createDepthMapCanvasFromBuffers(
 }
 
 /**
+ * Converts a raw RGBA8 DataTexture into a canvas-backed texture.
+ * GLTFExporter re-draws some maps (e.g. normal maps that need a channel flip)
+ * with drawImage(), which only accepts real images/canvases, not DataTextures.
+ */
+function dataTextureToCanvasTexture(tex: THREE.Texture): THREE.Texture {
+  const img = tex.image as { data?: ArrayLike<number>; width: number; height: number } | undefined;
+  if (!(tex as THREE.DataTexture).isDataTexture || !img || !img.data) return tex;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return tex;
+
+  // Rows are copied as-is and flipY is preserved, so GLTFExporter keeps the
+  // same UV orientation it would use for the original texture.
+  const imageData = ctx.createImageData(img.width, img.height);
+  imageData.data.set(img.data as ArrayLike<number>);
+  ctx.putImageData(imageData, 0, 0);
+
+  const out = new THREE.CanvasTexture(canvas);
+  out.colorSpace = tex.colorSpace;
+  out.wrapS = tex.wrapS;
+  out.wrapT = tex.wrapT;
+  out.minFilter = tex.minFilter;
+  out.magFilter = tex.magFilter;
+  out.channel = tex.channel;
+  out.flipY = tex.flipY;
+  return out;
+}
+
+const EXPORTABLE_MAP_KEYS = [
+  'map',
+  'normalMap',
+  'roughnessMap',
+  'metalnessMap',
+  'aoMap',
+  'emissiveMap',
+  'clearcoatMap',
+  'clearcoatRoughnessMap',
+  'clearcoatNormalMap',
+] as const;
+
+/**
+ * Returns an export-safe copy of the object: materials are cloned and every
+ * DataTexture is converted to a canvas texture. The live scene is untouched.
+ */
+function prepareObjectForGLTFExport(root: THREE.Object3D): THREE.Object3D {
+  const copy = root.clone(true);
+  // The viewport sways/turns the model for display; export it facing +Z, upright.
+  copy.position.set(0, 0, 0);
+  copy.rotation.set(0, 0, 0);
+  copy.scale.set(1, 1, 1);
+  copy.updateMatrix();
+  const converted = new Map<THREE.Texture, THREE.Texture>();
+  const convert = (t: THREE.Texture) => {
+    let c = converted.get(t);
+    if (!c) {
+      c = dataTextureToCanvasTexture(t);
+      converted.set(t, c);
+    }
+    return c;
+  };
+
+  copy.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const cloned = mats.map((m) => {
+      const mc = m.clone() as THREE.Material & Record<string, unknown>;
+      for (const key of EXPORTABLE_MAP_KEYS) {
+        const t = mc[key];
+        if (t && (t as THREE.Texture).isTexture) mc[key] = convert(t as THREE.Texture);
+      }
+      return mc;
+    });
+    mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0];
+  });
+  return copy;
+}
+
+/**
  * Exports a THREE.Mesh to binary .GLB (ArrayBuffer).
  */
 export function exportMeshToGLBBytes(mesh: THREE.Object3D): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const exporter = new GLTFExporter();
     exporter.parse(
-      mesh,
+      prepareObjectForGLTFExport(mesh),
       (result) => {
         if (result instanceof ArrayBuffer) {
           resolve(new Uint8Array(result));

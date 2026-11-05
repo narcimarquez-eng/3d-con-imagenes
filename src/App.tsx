@@ -372,6 +372,46 @@ const PATTERN_LABELS: Record<TexturePattern, string> = {
   [TexturePattern.HexScales]: 'Escamas Hexagonales',
 };
 
+/**
+ * Draws an uploaded image into the square CNN tensor canvas without stretching it.
+ * The image is scaled to fit (keeping its aspect ratio) and centred; the empty
+ * margins are filled with the image's own corner colour so background detection
+ * still sees one uniform background.
+ */
+function drawImageFittedToTensor(ctx: CanvasRenderingContext2D, img: HTMLImageElement) {
+  const size = CNN_TENSOR_SIZE;
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+
+  // Average a small patch in each corner of the source image to get its background colour.
+  const probe = document.createElement('canvas');
+  probe.width = iw;
+  probe.height = ih;
+  const pctx = probe.getContext('2d', { willReadFrequently: true });
+  let fill = '#0c1220';
+  if (pctx) {
+    pctx.drawImage(img, 0, 0);
+    const patch = Math.max(1, Math.min(8, Math.floor(Math.min(iw, ih) / 20)));
+    let r = 0, g = 0, b = 0, a = 0, n = 0;
+    for (const [x, y] of [[0, 0], [iw - patch, 0], [0, ih - patch], [iw - patch, ih - patch]]) {
+      const d = pctx.getImageData(x, y, patch, patch).data;
+      for (let i = 0; i < d.length; i += 4) {
+        r += d[i]; g += d[i + 1]; b += d[i + 2]; a += d[i + 3]; n++;
+      }
+    }
+    // Transparent PNG backgrounds stay transparent so the alpha-based cutout keeps working.
+    fill = a / n < 32 ? 'rgba(0,0,0,0)' : `rgb(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)})`;
+  }
+
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = fill;
+  ctx.fillRect(0, 0, size, size);
+  const scale = Math.min(size / iw, size / ih);
+  const dw = iw * scale;
+  const dh = ih * scale;
+  ctx.drawImage(img, (size - dw) / 2, (size - dh) / 2, dw, dh);
+}
+
 export default function App() {
   const viewportRef = useRef<StudioViewportHandle | null>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -672,9 +712,7 @@ export default function App() {
         const srcCanvas = getSourceCanvas();
         const ctx = srcCanvas.getContext('2d');
         if (!ctx) return;
-        ctx.fillStyle = '#0c1220';
-        ctx.fillRect(0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
-        ctx.drawImage(img, 0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
+        drawImageFittedToTensor(ctx, img);
         setCustomImageName(file.name);
         setFeatureView(CNNFeatureView.RGBInput);
         setZones(DEFAULT_ZONES.map((z) => ({ ...z })));
@@ -706,9 +744,7 @@ export default function App() {
         tmpCanvas.height = CNN_TENSOR_SIZE;
         const ctx = tmpCanvas.getContext('2d');
         if (!ctx) return;
-        ctx.fillStyle = '#0c1220';
-        ctx.fillRect(0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
-        ctx.drawImage(img, 0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
+        drawImageFittedToTensor(ctx, img);
         processUploadedBackImage(tmpCanvas, cnnBuffersRef.current);
         setCustomBackImageName(file.name);
         setParams((prev) => ({
@@ -740,9 +776,7 @@ export default function App() {
         tmpCanvas.height = CNN_TENSOR_SIZE;
         const ctx = tmpCanvas.getContext('2d');
         if (!ctx) return;
-        ctx.fillStyle = '#0c1220';
-        ctx.fillRect(0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
-        ctx.drawImage(img, 0, 0, CNN_TENSOR_SIZE, CNN_TENSOR_SIZE);
+        drawImageFittedToTensor(ctx, img);
         processUploadedSideImage(tmpCanvas, cnnBuffersRef.current);
         setCustomSideImageName(file.name);
         setParams((prev) => ({

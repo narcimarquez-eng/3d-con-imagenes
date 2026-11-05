@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
-import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import {
   ATLAS_TEX_SIZE,
   CNN_TENSOR_SIZE,
@@ -131,20 +130,13 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
         const heroMesh = heroMeshRef.current;
         if (!heroMesh) return;
 
-        const exporter = new GLTFExporter();
-        exporter.parse(
-          heroMesh,
-          (result) => {
-            if (result instanceof ArrayBuffer) {
-              const blob = new Blob([result], { type: 'model/gltf-binary' });
-              triggerBlobDownload(blob, filename);
-            }
-          },
-          (error) => {
+        exportMeshToGLBBytes(heroMesh)
+          .then((bytes) => {
+            triggerBlobDownload(uint8ToBlob(bytes, 'model/gltf-binary'), filename);
+          })
+          .catch((error) => {
             console.error('Error al exportar archivo .GLB:', error);
-          },
-          { binary: true, onlyVisible: false }
-        );
+          });
       },
       exportOBJ: (filename = 'vortex3d_malla.obj') => {
         const heroMesh = heroMeshRef.current;

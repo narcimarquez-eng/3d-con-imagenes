@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<body style="margin:0;background:#ddd">
+<script type="importmap">{"imports":{"three":"/three/build/three.module.js","three/addons/":"/three/examples/jsm/"}}</script>
+<script type="module">
+// Minimal neutral viewer used by render_glb.cjs (no environment map, so metal
+// looks darker than in the app: judge shape with the clay mode).
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const W = +(new URLSearchParams(location.search).get('w') || 600);
+const H = +(new URLSearchParams(location.search).get('h') || 800);
+const r = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+r.setSize(W, H);
+r.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(r.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdddddd);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2.0));
+const dl = new THREE.DirectionalLight(0xffffff, 2);
+dl.position.set(2, 3, 4);
+scene.add(dl);
+const cam = new THREE.PerspectiveCamera(30, W / H, 0.01, 100);
+new GLTFLoader().load('/model.glb', (g) => {
+  const o = g.scene;
+  scene.add(o);
+  const box = new THREE.Box3().setFromObject(o);
+  const c = box.getCenter(new THREE.Vector3());
+  const s = box.getSize(new THREE.Vector3());
+  window.info = { size: s.toArray(), center: c.toArray(), clips: g.animations.map((a) => a.name) };
+  const d = Math.max(s.x, s.y, s.z) * 2.2;
+  // shot(angleRad, offsetX, offsetY, zoom)
+  window.shot = (ang, zx = 0, zy = 0, zf = 1) => {
+    const t = new THREE.Vector3(c.x + zx, c.y + zy, c.z);
+    cam.position.set(t.x + (Math.sin(ang) * d) / zf, t.y, t.z + (Math.cos(ang) * d) / zf);
+    cam.lookAt(t);
+    r.render(scene, cam);
+  };
+  const clay = new THREE.MeshStandardMaterial({ color: 0xb8b0a8, roughness: 0.65, metalness: 0, side: THREE.DoubleSide });
+  const orig = new Map();
+  o.traverse((m) => m.isMesh && orig.set(m, m.material));
+  window.clay = (on) => o.traverse((m) => m.isMesh && (m.material = on ? clay : orig.get(m)));
+  const mixer = new THREE.AnimationMixer(o);
+  window.anim = (name, t) => {
+    mixer.stopAllAction();
+    const clip = g.animations.find((a) => a.name === name);
+    if (clip) {
+      mixer.clipAction(clip).play();
+      mixer.setTime(t);
+    }
+    o.updateMatrixWorld(true);
+  };
+  window.ready = true;
+});
+</script>
+</body>
+</html>

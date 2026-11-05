@@ -1542,7 +1542,7 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
     for (let y = Math.round(lm.bottom - 0.17 * H); y <= Math.round(lm.bottom - 0.1 * H); y++) {
       const runs = rowRuns(mask, w, y);
       let best: [number, number] | null = null;
-      let bestD = Infinity;
+      let bestD = -Infinity;
       for (const [a, b] of runs) {
         // A run spanning the axis holds both legs: keep this side's half.
         const lo = side < 0 ? a : Math.max(a, Math.ceil(ax));
@@ -1550,7 +1550,9 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
         if (hi - lo < 1) continue;
         const d = Math.abs((lo + hi) / 2 - ax);
         if (d > 0.3 * H) continue;
-        if (d < bestD) {
+        // The leg is the outermost run on this side: a tail or fur hanging
+        // between the legs gives runs nearer the axis, which must not win.
+        if (d > bestD) {
           bestD = d;
           best = [lo, hi];
         }

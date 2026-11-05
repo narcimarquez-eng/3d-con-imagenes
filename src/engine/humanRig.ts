@@ -469,6 +469,14 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     const s = Math.max(-0.9, Math.min(0.9, Math.atan2(dx, dz))); // up to ~50°
     for (const part of ['UpLeg', 'Leg', 'Foot']) legSpin.set(`${prefix}${part}`, s);
   }
+  // Lateral angle of each shin at rest (Pose A: the ankles are apart, the feet
+  // turned out). While walking and running the shins come in under the knees.
+  const shinSplay = new Map<string, number>();
+  for (const prefix of ['Right', 'Left']) {
+    const shin = boneHead.get(`${prefix}Leg`);
+    if (!shin) continue;
+    shinSplay.set(prefix, Math.atan2(shin.tail[0] - shin.head[0], -(shin.tail[1] - shin.head[1])));
+  }
   const yAxis = new THREE.Vector3(0, 1, 0);
   const spinQ = new THREE.Quaternion();
   const spinInv = new THREE.Quaternion();
@@ -548,10 +556,17 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     };
   });
 
+  // Share of the rest splay the legs lose while walking/running (1 = legs under the hips).
+  const NARROW = 0.8;
   const gait = (name: string, duration: number, amp: number, knee: number, elbow: number, lean: number, bob: number) =>
     build(name, duration, 32, (p) => {
       const s = Math.sin(TWO_PI * p);
       const c = Math.cos(TWO_PI * p);
+      // Shins rotate towards the middle; feet turn so the toes point forward.
+      const adductR = -(shinSplay.get('Right') ?? 0) * NARROW;
+      const adductL = -(shinSplay.get('Left') ?? 0) * NARROW;
+      const footYawR = -(legSpin.get('RightFoot') ?? 0);
+      const footYawL = -(legSpin.get('LeftFoot') ?? 0);
       // Knee bends while the leg swings forward.
       const kneeR = knee * Math.max(0, Math.sin(TWO_PI * p + 0.9)) + 5 * DEG;
       const kneeL = knee * Math.max(0, Math.sin(TWO_PI * p + 0.9 + Math.PI)) + 5 * DEG;
@@ -563,10 +578,10 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
           Head: [-lean * 0.6, 3 * DEG * s * amp, 0],
           RightUpLeg: [-26 * DEG * amp * s, 0, 0],
           LeftUpLeg: [26 * DEG * amp * s, 0, 0],
-          RightLeg: [kneeR, 0, 0],
-          LeftLeg: [kneeL, 0, 0],
-          RightFoot: [-8 * DEG * amp * s, 0, 0],
-          LeftFoot: [8 * DEG * amp * s, 0, 0],
+          RightLeg: [kneeR, 0, adductR],
+          LeftLeg: [kneeL, 0, adductL],
+          RightFoot: [-8 * DEG * amp * s, footYawR, 0],
+          LeftFoot: [8 * DEG * amp * s, footYawL, 0],
           RightArm: [22 * DEG * amp * s, 0, 0],
           LeftArm: [-22 * DEG * amp * s, 0, 0],
           RightForeArm: [-elbow - 10 * DEG * amp * Math.max(0, -s), 0, 0],

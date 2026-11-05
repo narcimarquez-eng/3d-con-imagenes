@@ -79,7 +79,7 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
    - Los vértices del borde se ajustan al contorno real con precisión de subpíxel y se suaviza la línea del contorno.
    - Frente y espalda se unen **directamente en el contorno**, sin tira de junta, con normales compartidas.
    - Solo se conserva el trozo conectado más grande.
-6. **Botas**: largo del 15,5% de la altura, con el tobillo a un cuarto de la longitud desde el talón y la puntera más baja y algo afilada que siempre sobresale de la pierna. El **ancho es el de la pierna**, medido en la espinilla por encima del tobillo (no en las filas de abajo, donde sandalias, dedos y sombras lo ensanchan). Van unidas al hueso del pie.
+6. **Botas**: largo del 15,5% de la altura, con el tobillo a un cuarto de la longitud desde el talón y la puntera más baja y algo afilada que siempre sobresale de la pierna. El **ancho es el de la pierna**, medido en la espinilla por encima del tobillo (no en las filas de abajo, donde sandalias, dedos y sombras lo ensanchan). Van unidas al hueso del pie. **Dirección:** cada bota gira `FOOT_TURN_RAD` (40°) hacia fuera alrededor del tobillo (el pie de la izquierda de la pantalla apunta a la izquierda, y al revés). Hay que hacerlo porque las hojas de Pose A 55° dibujan los pies abiertos; si la hoja los tiene de frente, pon `FOOT_TURN_RAD = 0`. Mide el ángulo en la hoja: la longitud del pie proyectada en x es L·sen(θ). La textura sigue usando la posición sin girar, así que no se desplaza.
 7. **Textura**: el borde del atlas se repara (fondo y grises de mezcla dentro de una banda de 6 px se rellenan con el color del cuerpo; la espalda es más estricta) y las UV del borde se desplazan un poco hacia dentro. El mapa de metal y rugosidad se difumina para quitar chispas.
 8. **Sombras del suelo**: sin mapa, las franjas finas pegadas al suelo entre las piernas (de menos del 3,5% de la altura) se eliminan, porque si no se estiran al caminar.
 
@@ -94,6 +94,8 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 - **Índices de fila:** redondéalos siempre (un `neckY` con decimales rompió `runsByRow`).
 - **Pruebas sin navegador:** pueden engañar si el recorte no es idéntico al de la app; para datos fiables, lee los resultados desde la app.
 - **Animación Saludar:** la hombrera se queda en su sitio y la axila se estira. Es una limitación conocida.
+- **Botas con cola o pelaje entre las piernas (lobo, 5.jpg):** la detección de la pierna toma la cola y las dos piernas como una sola franja, así que las botas se centran entre las patas y quedan flotando debajo. Síntoma: en la vista en gris las botas son dos bultos sueltos bajo el cuerpo. Es un fallo de `buildShoes` (centro de pierna), no del giro. Hasta arreglarlo, no las des por buenas: o no las uses en ese personaje (el motor tiene `options.shoes = false`, pero la app y `export_glb.cjs` aún no lo exponen), o mídelas a mano. Los pies ya dibujados (garras, pezuñas) no necesitan botas.
+- **Medir el giro de las botas:** si la hoja tiene los pies abiertos, comprueba también la vista en gris desde arriba; las puntas deben apuntar hacia fuera y no quedar hundidas en el otro pie.
 
 ## Pruebas y entrega
 

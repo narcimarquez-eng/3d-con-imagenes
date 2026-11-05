@@ -882,8 +882,14 @@ function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBo
       // Mouth line and lower lip.
       f -= 0.018 * g2(u, 0, 0.22, v, 0.84, 0.016);
       f += 0.014 * g2(u, 0, 0.16, v, 0.87, 0.018);
-      // Chin.
-      f += 0.075 * g2(u, 0, 0.2, v, 0.95, 0.045);
+      // Chin: a small triangle pointing forward, wide at the top of the chin
+      // and narrowing to a tip at the bottom (linear edges, so it reads as a point).
+      const tv = (v - 0.84) / 0.16; // 0 at the top of the chin, 1 at the tip
+      if (tv > 0 && tv < 1) {
+        const hw = 0.3 * (1 - tv) + 0.02; // half width, shrinking to the tip
+        const k = Math.max(0, 1 - Math.abs(u) / hw);
+        f += 0.085 * k * Math.min(1, tv * 3);
+      }
       // Keep the edges of the head untouched.
       const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 3));
       D[i] = Math.max(0, D[i] + f * faceHalf * amount * fade);

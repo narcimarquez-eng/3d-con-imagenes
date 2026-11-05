@@ -95,6 +95,19 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 - **Pruebas sin navegador:** pueden engañar si el recorte no es idéntico al de la app; para datos fiables, lee los resultados desde la app.
 - **Animación Saludar:** la hombrera se queda en su sitio y la axila se estira. Es una limitación conocida.
 
+## Armas en las manos (espada, maza, escudo)
+
+`scripts/attach_weapons.mjs` une piezas de un GLB de arma (estático, una malla por pieza) a la mano de un GLB con esqueleto, y escribe dos archivos: `<salida>_normal.glb` y `<salida>_reducido.glb` (25 % de triángulos, texturas de 256 px, sin meshopt).
+
+- Hace falta `@gltf-transform/core` y el CLI `gltf-transform` en una carpeta de herramientas (no están en el repo). Por ejemplo, en `<carpeta>`: `npm i @gltf-transform/core @gltf-transform/cli meshoptimizer`. Ejecuta el script desde esa carpeta (copia el script ahí), o Node no encuentra el paquete.
+- Numeración de piezas: orden de nodos del archivo de arma, empezando en 1 (el 0 es la raíz).
+- Espada: `--right 1-16 --right-grip -0.26,0.95,0.19` (la empuñadura va en la palma; la hoja baja, `--right-rot 180`).
+- Escudo: `--left 17-34` (centro automático de sus piezas; se pone de pie con `--left-rot 90`).
+- Maza (archivo `Pieza_weapon_Suave_1`): `--right 1-23 --right-grip -0.26,0.95,0.19 --left 24-43`.
+- Ejemplo: `node attach_weapons.mjs --body golpe.glb --weapon arma.glb --out heroe_maza --right 1-23 --right-grip -0.26,0.95,0.19 --left 24-43 --gltf-transform <carpeta>/node_modules/.bin/gltf-transform`.
+- Antes de usar un arma nueva, lista las piezas con sus cajas (bounds) y la empuñadura; el script no las identifica por sí solo.
+- Las piezas quedan rígidas en el hueso de la mano: siguen al brazo, pero no se deforman.
+
 ## Pruebas y entrega
 
 - Antes de subir: `npx tsc --noEmit` y `npx vite build`.

@@ -151,7 +151,8 @@ export interface ReconstructionParams {
   rigAnimationSpeed?: number; // playback speed multiplier
   rigShowBones?: boolean; // draw the bones in the viewport
   humanBodyTemplate?: boolean; // fit a closed human body to the silhouette (Humanoid A-pose mold)
-  humanBodyDepth?: number; // 0.2..1.8 body depth multiplier for the human template
+  humanBodyDepth?: number;
+  humanFaceDetail?: number; // 0..2 facial features on the human template (1 = subtle) // 0.2..1.8 body depth multiplier for the human template
   humanReliefDetail?: number; // 0..1 photo relief added on top of the human template
   silhouetteInflation?: number; // 0..1.5 rounded volume from the outline (0.75 ≈ elliptical human cross-section)
   contourSnapStrength?: number; // 0..1 how strongly border vertices follow the real outline (anti saw-tooth)

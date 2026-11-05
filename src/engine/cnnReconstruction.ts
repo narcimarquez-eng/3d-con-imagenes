@@ -7354,7 +7354,9 @@ export function buildReconstructedMeshGeometry(
       {
         depthScale: Math.max(0.2, Math.min(1.8, params.humanBodyDepth ?? 1.0)),
         reliefAmount: Math.max(0.0, Math.min(1.0, params.humanReliefDetail ?? 0.5)),
-        rows: Math.round(Math.max(32, Math.min(144, params.gridResolution)) * 1.6),
+        // Finer than the relief grid so small features (face, fingers) have vertices.
+        rows: Math.round(Math.max(32, Math.min(144, params.gridResolution)) * 2.2),
+        faceDetail: params.humanFaceDetail ?? 1.0,
         rig: params.enableSkeleton === true,
       }
     );

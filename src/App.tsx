@@ -582,6 +582,7 @@ export default function App() {
     rigAnimationSpeed: 1.0,
     rigShowBones: true,
     humanBodyDepth: 1.0,
+    humanFaceDetail: 1.0,
     humanReliefDetail: 0.5,
     silhouetteInflation: 0.75,
     contourSnapStrength: 1.0,
@@ -1409,6 +1410,26 @@ export default function App() {
                             disabled={params.humanBodyTemplate === false}
                             onChange={(e) =>
                               setParams((p) => ({ ...p, humanReliefDetail: parseFloat(e.target.value) }))
+                            }
+                            className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-[160px]">
+                          <div className="flex justify-between text-[11px] mb-0.5">
+                            <span className="text-slate-400">Rasgos de la cara</span>
+                            <span className="font-mono text-slate-200 tabular-nums">
+                              {(params.humanFaceDetail ?? 1).toFixed(2)}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            value={params.humanFaceDetail ?? 1}
+                            disabled={params.humanBodyTemplate === false}
+                            onChange={(e) =>
+                              setParams((p) => ({ ...p, humanFaceDetail: parseFloat(e.target.value) }))
                             }
                             className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
                           />

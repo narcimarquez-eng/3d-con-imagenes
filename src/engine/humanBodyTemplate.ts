@@ -48,6 +48,8 @@ export interface HumanBodyOptions {
   rows: number;
   /** Also build a skeleton and skin weights (skinIndex / skinWeight attributes). */
   rig?: boolean;
+  /** Strength of the facial features (0 = none, 1 = subtle). */
+  faceDetail?: number;
   /** Add shoes (flat sole, toe forward). Default true. */
   shoes?: boolean;
 }
@@ -325,19 +327,18 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
     return r ? r[1] - r[0] + 1 : 0;
   };
 
-  // Head width: median axis width in the upper part of the head.
-  const headSamples: number[] = [];
-  for (let y = top + Math.round(H * 0.025); y <= top + Math.round(H * 0.07); y++) headSamples.push(axisWidth(y));
-  headSamples.sort((p, q) => p - q);
-  const headW = Math.max(3, headSamples[headSamples.length >> 1] || H * 0.08);
-
-  // Shoulders start where the body run becomes much wider than the head.
+  // Shoulders start where the body run becomes much wider than the head seen
+  // so far (the running maximum lets a head that widens gradually, e.g. from
+  // a narrow crest of hair, keep counting as head).
   let shoulderY = top + Math.round(H * 0.2);
-  for (let y = top + Math.round(H * 0.05); y <= top + Math.round(H * 0.3); y++) {
-    if (axisWidth(y) > headW * 1.8) {
+  let headMax = 0;
+  for (let y = top; y <= top + Math.round(H * 0.3); y++) {
+    const wd = axisWidth(y);
+    if (y > top + H * 0.05 && headMax > 2 && wd > headMax * 1.6) {
       shoulderY = y;
       break;
     }
+    headMax = Math.max(headMax, wd);
   }
 
   // Neck: narrowest axis run between the head and the shoulders.
@@ -350,6 +351,19 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
       neckY = y;
     }
   }
+
+  // Chin: a head (hair/helmet included) is ~1.35 times as tall as its skull is wide.
+  // This also works when a collar or shoulder pads hide the neck outline.
+  const skullWidths: number[] = [];
+  for (let y = top + Math.round(H * 0.025); y <= top + Math.round(H * 0.07); y++) {
+    const wd = axisWidth(y);
+    if (wd > 0) skullWidths.push(wd);
+  }
+  skullWidths.sort((p, q) => p - q);
+  const skullW = skullWidths.length ? skullWidths[skullWidths.length >> 1] : H * 0.1;
+  const chinEstimate = top + Math.round(skullW * 1.35);
+  neckY = Math.min(Math.max(neckY, chinEstimate), shoulderY);
+  const headHalfMax = (skullW / 2) * 1.15;
 
   // Crotch: top of the gap between the legs (on the body axis), but never lower
   // than an anatomical limit, so cloth hanging between the legs is not torso.
@@ -432,8 +446,11 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
         const i = y * w + x;
         let d = 0;
         if (y < neckY && k === kAxis) {
-          // Head: oval, slightly deeper than wide.
-          d = crossSection(x - runCenter, runHalf, runHalf * 1.08, 2.0);
+          // Head: oval, slightly deeper than wide. Collars or shoulder pads
+          // merged with the head in these rows are left to the limb pass.
+          const hh = Math.min(runHalf, headHalfMax);
+          const hc = runHalf > headHalfMax ? axisX : runCenter;
+          d = crossSection(x - hc, hh, hh * 1.08, 2.0);
         } else if (y >= neckY && y <= crotchY) {
           const t = (y - neckY) / Math.max(1, crotchY - neckY);
           const half = coreHalf[y];
@@ -510,6 +527,79 @@ function addPhotoDetail(dst: Float32Array, base: Float32Array, relief: Float32Ar
     const hp = relief[i] - _radius[i];
     const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 5));
     dst[i] = Math.max(0, base[i] + hp * amount * fade);
+  }
+}
+
+/**
+ * Subtle human facial relief on the front of the head, placed with classic
+ * proportions (hair or a helmet take the top of the head, so the eyes sit at
+ * ~56% of the head height, nose tip ~73%, chin at the bottom): brow ridge, eye sockets, nose bridge and tip, cheekbones, a soft
+ * mouth line and a defined chin. Heights are relative to the head width.
+ */
+function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBodyLandmarks, amount: number) {
+  if (amount <= 0.001) return;
+  const top = lm.top;
+  const chin = lm.neckY;
+  const Hh = chin - top;
+  if (Hh < 8) return;
+
+  // Head centre and half width from the middle of the head.
+  let sumC = 0;
+  let nC = 0;
+  const halves: number[] = [];
+  for (let y = Math.round(top + 0.3 * Hh); y <= Math.round(top + 0.8 * Hh); y++) {
+    const runs = rowRuns(mask, w, y);
+    const k = runNearest(runs, lm.axisX);
+    if (k < 0) continue;
+    const [a, b] = runs[k];
+    sumC += (a + b) / 2;
+    nC++;
+    halves.push((b - a + 1) / 2);
+  }
+  // Median width, so ears or hair sticking out do not widen the face.
+  halves.sort((p, q) => p - q);
+  const half = halves.length ? halves[halves.length >> 1] : 0;
+  if (nC === 0 || half < 3) return;
+  const cx = sumC / nC;
+
+  const g = (d: number, s: number) => Math.exp(-(d * d) / (2 * s * s));
+  const g2 = (u: number, u0: number, su: number, v: number, v0: number, sv: number) => g(u - u0, su) * g(v - v0, sv);
+  const smooth = (a: number, b: number, t: number) => {
+    const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+    return x * x * (3 - 2 * x);
+  };
+
+  const y0 = Math.max(0, top);
+  const y1 = Math.min(w - 1, Math.round(chin + 0.06 * Hh));
+  const x0 = Math.max(0, Math.floor(cx - half));
+  const x1 = Math.min(w - 1, Math.ceil(cx + half));
+  for (let y = y0; y <= y1; y++) {
+    const v = (y - top) / Hh;
+    for (let x = x0; x <= x1; x++) {
+      const i = y * w + x;
+      if (mask[i] !== 1) continue;
+      const u = (x - cx) / half;
+      let f = 0;
+      // Nose: bridge rising towards the tip, tip, and the wings of the nostrils.
+      f += 0.13 * g(u, 0.1) * smooth(0.52, 0.72, v) * (1 - smooth(0.74, 0.8, v));
+      f += 0.06 * g2(u, 0, 0.13, v, 0.73, 0.04);
+      f += 0.025 * (g2(u, -0.14, 0.07, v, 0.76, 0.028) + g2(u, 0.14, 0.07, v, 0.76, 0.028));
+      // Brow ridge, slightly lower in the middle.
+      f += 0.045 * g(v - 0.5, 0.032) * (1 - smooth(0.55, 0.75, Math.abs(u))) * (1 - 0.35 * g(u, 0.1));
+      // Eye sockets.
+      f -= 0.065 * (g2(u, -0.32, 0.13, v, 0.565, 0.045) + g2(u, 0.32, 0.13, v, 0.565, 0.045));
+      // Cheekbones and the soft hollow below them.
+      f += 0.05 * (g2(u, -0.46, 0.12, v, 0.66, 0.05) + g2(u, 0.46, 0.12, v, 0.66, 0.05));
+      f -= 0.022 * (g2(u, -0.42, 0.12, v, 0.8, 0.05) + g2(u, 0.42, 0.12, v, 0.8, 0.05));
+      // Mouth line and lower lip.
+      f -= 0.018 * g2(u, 0, 0.22, v, 0.84, 0.016);
+      f += 0.014 * g2(u, 0, 0.16, v, 0.87, 0.018);
+      // Chin.
+      f += 0.075 * g2(u, 0, 0.2, v, 0.95, 0.045);
+      // Keep the edges of the head untouched.
+      const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 3));
+      D[i] = Math.max(0, D[i] + f * half * amount * fade);
+    }
   }
 }
 
@@ -688,10 +778,11 @@ export function buildHumanBodyTemplateGeometry(
   const reliefTexels = 9 * Math.max(0, Math.min(1, options.reliefAmount));
   addPhotoDetail(_frontD, _depth, inputs.frontRelief, mask, w, reliefTexels);
   addPhotoDetail(_backD, _depth, inputs.backRelief, mask, w, reliefTexels);
+  addFaceRelief(_frontD, mask, w, landmarks, Math.max(0, Math.min(2, options.faceDetail ?? 1)));
   buildOutlineField(mask, w);
 
   const { top, bottom } = landmarks;
-  const rows = Math.max(40, Math.min(320, Math.round(options.rows)));
+  const rows = Math.max(40, Math.min(400, Math.round(options.rows)));
   const H = Math.max(1, bottom - top + 1);
   const cs = (H + 4) / rows; // texels per cell
 

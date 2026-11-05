@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { computeHumanRig, computeSkinWeightMaps, sampleSkinWeights, type HumanRig } from './humanRig';
 
 // ============================================================================
 // HUMAN BODY TEMPLATE
@@ -43,6 +44,8 @@ export interface HumanBodyOptions {
   reliefAmount: number;
   /** Mesh rows over the figure height. */
   rows: number;
+  /** Also build a skeleton and skin weights (skinIndex / skinWeight attributes). */
+  rig?: boolean;
 }
 
 export interface HumanBodyLandmarks {
@@ -50,6 +53,7 @@ export interface HumanBodyLandmarks {
   bottom: number;
   axisX: number;
   neckY: number;
+  shoulderY: number;
   armpitY: number;
   crotchY: number;
 }
@@ -58,6 +62,7 @@ export interface HumanBodyStats {
   vertexCount: number;
   triangleCount: number;
   landmarks: HumanBodyLandmarks;
+  rig?: HumanRig;
 }
 
 // World units: the existing pipeline maps the full tensor width to 2.85 units.
@@ -297,7 +302,7 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
   }
   _depth.fill(0);
   if (top < 0 || mass < 50) {
-    return { top: 0, bottom: 0, axisX: w / 2, neckY: 0, armpitY: 0, crotchY: 0 };
+    return { top: 0, bottom: 0, axisX: w / 2, neckY: 0, shoulderY: 0, armpitY: 0, crotchY: 0 };
   }
   const H = bottom - top + 1;
   const axisX = massX / mass;
@@ -479,7 +484,7 @@ function buildHumanDepthMap(mask: Uint8Array, w: number): HumanBodyLandmarks {
   // Blend the parts together (head/neck, torso/legs, torso/arms) without seams.
   blur5(D, w, 3, mask);
 
-  return { top, bottom, axisX, neckY, armpitY, crotchY };
+  return { top, bottom, axisX, neckY, shoulderY, armpitY, crotchY };
 }
 
 /** Blurred mask whose 0.5 level is the smooth outline. */
@@ -912,6 +917,30 @@ export function buildHumanBodyTemplateGeometry(
     nor[v * 3 + 2] /= l;
   }
 
+  // Skeleton + skin weights (optional).
+  let rig: HumanRig | undefined;
+  if (options.rig) {
+    rig = computeHumanRig(mask, w, landmarks, WORLD_SPAN);
+    const maps = computeSkinWeightMaps(rig, mask, w, WORLD_SPAN);
+    const skinIndex = new Uint16Array(vCount * 4);
+    const skinWeight = new Float32Array(vCount * 4);
+    for (let n = 0; n < nNodes; n++) {
+      const f = frontIdx[n];
+      if (f < 0) continue;
+      sampleSkinWeights(maps, mask, w, nodeX[n], nodeY[n], skinIndex, skinWeight, f * 4);
+      const b = f + nUsed;
+      for (let k = 0; k < 4; k++) {
+        skinIndex[b * 4 + k] = skinIndex[f * 4 + k];
+        skinWeight[b * 4 + k] = skinWeight[f * 4 + k];
+      }
+    }
+    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
+    geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeight, 4));
+  } else {
+    if (geometry.getAttribute('skinIndex')) geometry.deleteAttribute('skinIndex');
+    if (geometry.getAttribute('skinWeight')) geometry.deleteAttribute('skinWeight');
+  }
+
   inputs.vertexUsedMask.fill(0);
   inputs.vertexUsedMask.fill(1, 0, vCount);
 
@@ -923,7 +952,7 @@ export function buildHumanBodyTemplateGeometry(
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
 
-  return { vertexCount: vCount, triangleCount: ip / 3, landmarks };
+  return { vertexCount: vCount, triangleCount: ip / 3, landmarks, rig };
 }
 
 /** Debug helper: depth map (texels), core mask and landmarks for a silhouette. */

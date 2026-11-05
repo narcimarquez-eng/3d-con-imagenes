@@ -521,6 +521,10 @@ export default function App() {
     seamlessBorderSmoothing: 0.92,
     seamlessBorderWidth: 8.5,
     humanBodyTemplate: true,
+    enableSkeleton: false,
+    rigAnimation: 'idle',
+    rigAnimationSpeed: 1.0,
+    rigShowBones: true,
     humanBodyDepth: 1.0,
     humanReliefDetail: 0.5,
     silhouetteInflation: 0.75,
@@ -1352,6 +1356,78 @@ export default function App() {
                             }
                             className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
                           />
+                        </div>
+                      </div>
+                      {/* Skeleton + animations */}
+                      <div className="mt-2.5 pt-2.5 border-t border-emerald-500/20">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                          <label className="flex items-center gap-2 text-xs font-semibold text-emerald-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={params.enableSkeleton === true}
+                              disabled={params.humanBodyTemplate === false}
+                              onChange={(e) =>
+                                setParams((p) => ({ ...p, enableSkeleton: e.target.checked }))
+                              }
+                            />
+                            Esqueleto y animaciones
+                          </label>
+                          <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={params.rigShowBones !== false}
+                              disabled={params.enableSkeleton !== true}
+                              onChange={(e) =>
+                                setParams((p) => ({ ...p, rigShowBones: e.target.checked }))
+                              }
+                            />
+                            Mostrar huesos
+                          </label>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-0.5 mb-1.5">
+                          Coloca automáticamente un esqueleto humano (Hips, Spine, Head, brazos y piernas) dentro de la
+                          silueta. El .GLB exportado incluye los huesos y todas las animaciones.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {[
+                            ['none', 'Pose de reposo'],
+                            ['idle', 'Reposo'],
+                            ['walk', 'Caminar'],
+                            ['run', 'Correr'],
+                            ['wave', 'Saludar'],
+                          ].map(([id, label]) => (
+                            <button
+                              key={id}
+                              type="button"
+                              disabled={params.enableSkeleton !== true}
+                              onClick={() => setParams((p) => ({ ...p, rigAnimation: id }))}
+                              className={`px-2 py-1 text-[11px] font-semibold rounded border cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                                (params.rigAnimation ?? 'idle') === id
+                                  ? 'bg-emerald-500/25 border-emerald-400 text-emerald-100'
+                                  : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-slate-100'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                          <div className="flex items-center gap-2 ml-2 min-w-[180px] flex-1">
+                            <span className="text-[11px] text-slate-400 whitespace-nowrap">Velocidad</span>
+                            <input
+                              type="range"
+                              min={0.1}
+                              max={2.5}
+                              step={0.05}
+                              value={params.rigAnimationSpeed ?? 1}
+                              disabled={params.enableSkeleton !== true}
+                              onChange={(e) =>
+                                setParams((p) => ({ ...p, rigAnimationSpeed: parseFloat(e.target.value) }))
+                              }
+                              className="w-full accent-emerald-400 cursor-pointer disabled:opacity-40"
+                            />
+                            <span className="font-mono text-[11px] text-slate-200 tabular-nums">
+                              {(params.rigAnimationSpeed ?? 1).toFixed(2)}x
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </div>

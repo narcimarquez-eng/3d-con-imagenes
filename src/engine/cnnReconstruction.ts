@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildHumanBodyTemplateGeometry } from './humanBodyTemplate';
+import type { HumanRig } from './humanRig';
 import {
   BackImageSourceMode,
   BackgroundCutoutMode,
@@ -5041,6 +5042,7 @@ export function buildReconstructedMeshGeometry(
   cutoutTrianglesRemoved: number;
   stitchedSideFacesCount: number;
   triangleCount: number;
+  rig?: HumanRig;
 } {
   const poissonSolveMs = solvePoissonSurfaceFromNormals(buffers, params);
   const t0 = performance.now();
@@ -7352,6 +7354,7 @@ export function buildReconstructedMeshGeometry(
         depthScale: Math.max(0.2, Math.min(1.8, params.humanBodyDepth ?? 1.0)),
         reliefAmount: Math.max(0.0, Math.min(1.0, params.humanReliefDetail ?? 0.5)),
         rows: Math.round(Math.max(32, Math.min(144, params.gridResolution)) * 1.6),
+        rig: params.enableSkeleton === true,
       }
     );
     return {
@@ -7362,6 +7365,7 @@ export function buildReconstructedMeshGeometry(
       cutoutTrianglesRemoved: 0,
       stitchedSideFacesCount: 0,
       triangleCount: body.triangleCount,
+      rig: body.rig,
     };
   }
 

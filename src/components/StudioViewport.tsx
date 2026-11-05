@@ -1,6 +1,12 @@
 import React, { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  clipNameForAnimation,
+  createHumanAnimationClips,
+  createSkeletonBones,
+  type HumanRig,
+} from '../engine/humanRig';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import {
@@ -109,6 +115,13 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
     cnnInferenceMsRef.current = cnnInferenceMs;
 
     const heroMeshRef = useRef<THREE.Mesh | null>(null);
+    // Skinned copy of the hero mesh with its skeleton and animations (when enabled).
+    const rigRef = useRef<{
+      mesh: THREE.SkinnedMesh;
+      helper: THREE.SkeletonHelper | null;
+      mixer: THREE.AnimationMixer;
+      clips: THREE.AnimationClip[];
+    } | null>(null);
     const heroMatRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
     const wireframeMeshRef = useRef<THREE.LineSegments | null>(null);
     const voxelInstancedRef = useRef<THREE.InstancedMesh | null>(null);
@@ -124,13 +137,20 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const vertexDeltaPoolRef = useRef<VertexDeltaPool>(new VertexDeltaPool(16384));
     const rebuildGeometryFnRef = useRef<(() => void) | null>(null);
+    const updateRigPlaybackFnRef = useRef<(() => void) | null>(null);
+    const prevRebuildInputsRef = useRef<{
+      cnnVersion: number;
+      params: ReconstructionParams;
+      zones: ZoneConfig[];
+    } | null>(null);
 
     useImperativeHandle(ref, () => ({
       exportGLB: (filename = 'vortex3d_modelo_neuronal.glb') => {
         const heroMesh = heroMeshRef.current;
         if (!heroMesh) return;
 
-        exportMeshToGLBBytes(heroMesh)
+        const rig = rigRef.current;
+        exportMeshToGLBBytes(rig ? rig.mesh : heroMesh, rig ? rig.clips : [])
           .then((bytes) => {
             triggerBlobDownload(uint8ToBlob(bytes, 'model/gltf-binary'), filename);
           })
@@ -185,7 +205,10 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
             canvasToPNGBytes(createRGBCanvasFromBuffers(buffers)),
             canvasToPNGBytes(createNormalMapCanvasFromBuffers(buffers)),
             canvasToPNGBytes(createDepthMapCanvasFromBuffers(buffers)),
-            exportMeshToGLBBytes(heroMesh),
+            exportMeshToGLBBytes(
+              rigRef.current ? rigRef.current.mesh : heroMesh,
+              rigRef.current ? rigRef.current.clips : []
+            ),
             renderBlobPromise,
           ]);
         const objBytes = exportGeometryToWavefrontOBJ(heroMesh.geometry, baseName);
@@ -638,6 +661,85 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
         return instanceIdx;
       };
 
+      const disposeRig = () => {
+        const r = rigRef.current;
+        if (!r) return;
+        r.mixer.stopAllAction();
+        r.mixer.uncacheRoot(r.mesh);
+        scene.remove(r.mesh);
+        r.mesh.skeleton.dispose();
+        if (r.helper) {
+          scene.remove(r.helper);
+          r.helper.dispose();
+        }
+        rigRef.current = null;
+      };
+
+      const setupRig = (rig: HumanRig) => {
+        const { root, bones } = createSkeletonBones(rig);
+        const skinned = new THREE.SkinnedMesh(heroGeo, heroMat);
+        skinned.name = 'Personaje';
+        skinned.frustumCulled = false;
+        skinned.castShadow = heroMesh.castShadow;
+        skinned.receiveShadow = heroMesh.receiveShadow;
+        skinned.position.copy(heroMesh.position);
+        skinned.rotation.copy(heroMesh.rotation);
+        skinned.add(root);
+        skinned.updateMatrixWorld(true);
+        skinned.bind(new THREE.Skeleton(bones));
+        scene.add(skinned);
+
+        let helper: THREE.SkeletonHelper | null = null;
+        if (paramsRef.current.rigShowBones) {
+          helper = new THREE.SkeletonHelper(skinned);
+          const hm = helper.material as THREE.LineBasicMaterial;
+          hm.depthTest = false;
+          hm.transparent = true;
+          helper.renderOrder = 20;
+          scene.add(helper);
+        }
+
+        const clips = createHumanAnimationClips(rig);
+        const mixer = new THREE.AnimationMixer(skinned);
+        const clipName = clipNameForAnimation(paramsRef.current.rigAnimation ?? 'idle');
+        const clip = clipName ? clips.find((c) => c.name === clipName) : undefined;
+        if (clip) mixer.clipAction(clip).play();
+        rigRef.current = { mesh: skinned, helper, mixer, clips };
+      };
+
+      // Switch animation clip / bone display on the existing rig.
+      updateRigPlaybackFnRef.current = () => {
+        const r = rigRef.current;
+        if (!r) return;
+        const clipName = clipNameForAnimation(paramsRef.current.rigAnimation ?? 'idle');
+        const clip = clipName ? r.clips.find((c) => c.name === clipName) : undefined;
+        r.mixer.stopAllAction();
+        if (clip) {
+          r.mixer.clipAction(clip).reset().play();
+        } else {
+          // Rest pose: put every bone back where it was bound.
+          r.mesh.skeleton.bones.forEach((b) => {
+            const bp = b.userData.bindPosition as number[] | undefined;
+            if (bp) b.position.fromArray(bp);
+            b.quaternion.identity();
+          });
+        }
+        const wantBones = paramsRef.current.rigShowBones !== false;
+        if (wantBones && !r.helper) {
+          const helper = new THREE.SkeletonHelper(r.mesh);
+          const hm = helper.material as THREE.LineBasicMaterial;
+          hm.depthTest = false;
+          hm.transparent = true;
+          helper.renderOrder = 20;
+          scene.add(helper);
+          r.helper = helper;
+        } else if (!wantBones && r.helper) {
+          scene.remove(r.helper);
+          r.helper.dispose();
+          r.helper = null;
+        }
+      };
+
       const rebuildAll = () => {
         const stats = buildReconstructedMeshGeometry(
           heroGeo,
@@ -661,7 +763,16 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
         }
 
         const isVoxel = paramsRef.current.instancedVoxelMode;
-        heroMesh.visible = !isVoxel;
+        disposeRig();
+        if (
+          paramsRef.current.enableSkeleton &&
+          stats.rig &&
+          heroGeo.getAttribute('skinIndex') &&
+          !isVoxel
+        ) {
+          setupRig(stats.rig);
+        }
+        heroMesh.visible = !isVoxel && !rigRef.current;
         voxelInstanced.visible = isVoxel;
         let activeInstances = 36;
         if (isVoxel) {
@@ -952,6 +1063,13 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
           pedestalGroup.rotation.y = heroMesh.rotation.y * 0.5;
         }
 
+        const rigNow = rigRef.current;
+        if (rigNow) {
+          rigNow.mixer.update(dt * Math.max(0, paramsRef.current.rigAnimationSpeed ?? 1));
+          rigNow.mesh.position.copy(heroMesh.position);
+          rigNow.mesh.rotation.copy(heroMesh.rotation);
+        }
+
         const elevRad = THREE.MathUtils.degToRad(lCfg.elevationDeg);
         if (lCfg.autoRotateLight) {
           lightOrbitAngle += dt * 0.65;
@@ -986,6 +1104,7 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
         domElem.removeEventListener('pointermove', onPointerMove);
         window.removeEventListener('pointerup', onPointerUp);
         window.removeEventListener('resize', onResize);
+        disposeRig();
         heroGeo.dispose();
         heroMat.dispose();
         wireMat.dispose();
@@ -1004,6 +1123,21 @@ export const StudioViewport = forwardRef<StudioViewportHandle, StudioViewportPro
     }, []);
 
     useEffect(() => {
+      // Changing only the animation, its speed or the bone display does not need a rebuild.
+      const prev = prevRebuildInputsRef.current;
+      prevRebuildInputsRef.current = { cnnVersion, params, zones };
+      const playbackOnly = new Set(['rigAnimation', 'rigAnimationSpeed', 'rigShowBones']);
+      const onlyPlaybackChanged =
+        prev !== null &&
+        prev.cnnVersion === cnnVersion &&
+        prev.zones === zones &&
+        (Object.keys({ ...prev.params, ...params }) as Array<keyof ReconstructionParams>).every(
+          (k) => playbackOnly.has(k as string) || prev.params[k] === params[k]
+        );
+      if (onlyPlaybackChanged && rigRef.current) {
+        updateRigPlaybackFnRef.current?.();
+        return;
+      }
       rebuildGeometryFnRef.current?.();
       if (pedestalGroupRef.current) {
         pedestalGroupRef.current.visible = params.showTurntablePedestal;

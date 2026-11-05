@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import {
   ATLAS_TEX_SIZE,
   CNN_TENSOR_SIZE,
@@ -214,7 +215,17 @@ const EXPORTABLE_MAP_KEYS = [
  * DataTexture is converted to a canvas texture. The live scene is untouched.
  */
 function prepareObjectForGLTFExport(root: THREE.Object3D): THREE.Object3D {
-  const copy = root.clone(true);
+  // SkeletonUtils.clone keeps skinned meshes bound to their (cloned) bones.
+  const copy = SkeletonUtils.clone(root);
+  // Bones go back to the rest pose: the clip, not the frame being shown, holds the motion.
+  copy.traverse((o) => {
+    const bone = o as THREE.Bone;
+    if (bone.isBone && Array.isArray(bone.userData.bindPosition)) {
+      bone.position.fromArray(bone.userData.bindPosition as number[]);
+      bone.quaternion.identity();
+      bone.scale.set(1, 1, 1);
+    }
+  });
   // The viewport sways/turns the model for display; export it facing +Z, upright.
   copy.position.set(0, 0, 0);
   copy.rotation.set(0, 0, 0);
@@ -250,7 +261,10 @@ function prepareObjectForGLTFExport(root: THREE.Object3D): THREE.Object3D {
 /**
  * Exports a THREE.Mesh to binary .GLB (ArrayBuffer).
  */
-export function exportMeshToGLBBytes(mesh: THREE.Object3D): Promise<Uint8Array> {
+export function exportMeshToGLBBytes(
+  mesh: THREE.Object3D,
+  animations: THREE.AnimationClip[] = []
+): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const exporter = new GLTFExporter();
     exporter.parse(
@@ -263,7 +277,7 @@ export function exportMeshToGLBBytes(mesh: THREE.Object3D): Promise<Uint8Array> 
         }
       },
       (err) => reject(err),
-      { binary: true, onlyVisible: false }
+      { binary: true, onlyVisible: false, animations }
     );
   });
 }

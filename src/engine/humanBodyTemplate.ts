@@ -888,7 +888,7 @@ function addFaceRelief(D: Float32Array, mask: Uint8Array, w: number, lm: HumanBo
       if (tv > 0 && tv < 1) {
         const hw = 0.3 * (1 - tv) + 0.02; // half width, shrinking to the tip
         const k = Math.max(0, 1 - Math.abs(u) / hw);
-        f += 0.085 * k * Math.min(1, tv * 3);
+        f += 0.13 * k * Math.min(1, tv * 3);
       }
       // Keep the edges of the head untouched.
       const fade = Math.min(1, Math.max(0, (_dist[i] - 1) / 3));

@@ -520,6 +520,9 @@ export default function App() {
     shapeOffsetY: 0.0,
     seamlessBorderSmoothing: 0.92,
     seamlessBorderWidth: 8.5,
+    silhouetteInflation: 0.75,
+    contourSnapStrength: 1.0,
+    reliefEdgeSmoothing: 0.7,
     wireframeOverlay: false,
     instancedVoxelMode: false,
     showTurntablePedestal: true,
@@ -3412,6 +3415,75 @@ export default function App() {
               {/* TAB 1B: SUAVIZADO AVANZADO (HASTA 30 PASOS) Y UNIÓN DE PUNTOS CERCANOS (SOLDADURA ESPACIAL ZERO-GC) */}
               {activeTab === 'smoothing' && (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+                  {/* Volume, outline and relief quality */}
+                  <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-3 gap-4 pb-3 border-b border-slate-800/80">
+                    <div title="Da grosor redondeado a cada parte según su anchura (brazos como tubos, torso más profundo).">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">Volumen redondeado (inflado de silueta)</span>
+                        <span className="font-mono text-slate-200 tabular-nums">
+                          {(params.silhouetteInflation ?? 0.75).toFixed(2)}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1.5}
+                        step={0.05}
+                        value={params.silhouetteInflation ?? 0.75}
+                        onChange={(e) =>
+                          setParams((p) => ({
+                            ...p,
+                            silhouetteInflation: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full accent-emerald-400 cursor-pointer"
+                      />
+                    </div>
+                    <div title="Ajusta los vértices del borde al contorno real del dibujo y suaviza la línea.">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">Contorno suave (anti dientes de sierra)</span>
+                        <span className="font-mono text-slate-200 tabular-nums">
+                          {(params.contourSnapStrength ?? 1.0).toFixed(2)}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={params.contourSnapStrength ?? 1.0}
+                        onChange={(e) =>
+                          setParams((p) => ({
+                            ...p,
+                            contourSnapStrength: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full accent-emerald-400 cursor-pointer"
+                      />
+                    </div>
+                    <div title="Quita grumos del relieve de la foto sin borrar los bordes entre placas.">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-400">Suavizado de relieve (respeta bordes)</span>
+                        <span className="font-mono text-slate-200 tabular-nums">
+                          {(params.reliefEdgeSmoothing ?? 0.7).toFixed(2)}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={params.reliefEdgeSmoothing ?? 0.7}
+                        onChange={(e) =>
+                          setParams((p) => ({
+                            ...p,
+                            reliefEdgeSmoothing: parseFloat(e.target.value),
+                          }))
+                        }
+                        className="w-full accent-emerald-400 cursor-pointer"
+                      />
+                    </div>
+                  </div>
                   {/* Column 1: Smoothing Algorithm Selector + Presets */}
                   <div className="lg:col-span-4 flex flex-col justify-between border-r border-slate-800/80 pr-4">
                     <div>

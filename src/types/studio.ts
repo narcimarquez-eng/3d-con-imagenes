@@ -146,6 +146,9 @@ export interface ReconstructionParams {
   shapeOffsetX: number; // -0.35 to +0.35 horizontal center offset
   shapeOffsetY: number; // -0.35 to +0.35 vertical center offset
   seamlessBorderSmoothing: number; // 0.0 to 1.0 makes the border union between Front & Back disappear via cross-shell smoothing
+  silhouetteInflation?: number; // 0..1.5 rounded volume from the outline (0.75 ≈ elliptical human cross-section)
+  contourSnapStrength?: number; // 0..1 how strongly border vertices follow the real outline (anti saw-tooth)
+  reliefEdgeSmoothing?: number; // 0..1 edge-aware smoothing of the photo relief (removes lumps, keeps plate edges)
   seamlessBorderWidth: number; // 2 to 18 grid cells width of the smooth border transition zone
   normalReconMode: NormalReconstructionMode;
   poissonIterations: number; // 10 to 120

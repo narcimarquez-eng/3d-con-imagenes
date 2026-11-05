@@ -845,6 +845,66 @@ export function runCNNReconstructionPipeline(
   return performance.now() - t0;
 }
 
+const _reliefTemp = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+
+/**
+ * Joint bilateral filter on the depth map, guided by the colour image.
+ * Pixels only average with nearby pixels of similar colour, so a flat plate
+ * becomes smooth but the step to the next plate (different colour) survives.
+ */
+function smoothReliefEdgeAware(
+  depth: Float32Array,
+  rgb: Float32Array,
+  bgMask: Uint8Array,
+  strength: number
+): void {
+  if (strength <= 0.001) return;
+  const w = CNN_TENSOR_SIZE;
+  const h = CNN_TENSOR_SIZE;
+  const radius = 3;
+  const sigmaS = 2.0;
+  const sigmaR = 0.06 + 0.1 * strength; // colour distance tolerance
+  const invS = -1 / (2 * sigmaS * sigmaS);
+  const invR = -1 / (2 * sigmaR * sigmaR);
+  const passes = strength > 0.5 ? 2 : 1;
+
+  for (let pass = 0; pass < passes; pass++) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (bgMask[i] === 1) {
+          _reliefTemp[i] = depth[i];
+          continue;
+        }
+        const r0 = rgb[i * 3];
+        const g0 = rgb[i * 3 + 1];
+        const b0 = rgb[i * 3 + 2];
+        let sum = 0;
+        let wsum = 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -radius; dx <= radius; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            const j = yy * w + xx;
+            if (bgMask[j] === 1) continue;
+            const dr = rgb[j * 3] - r0;
+            const dg = rgb[j * 3 + 1] - g0;
+            const db = rgb[j * 3 + 2] - b0;
+            const wt = Math.exp((dx * dx + dy * dy) * invS + (dr * dr + dg * dg + db * db) * invR);
+            sum += depth[j] * wt;
+            wsum += wt;
+          }
+        }
+        const filtered = wsum > 0 ? sum / wsum : depth[i];
+        _reliefTemp[i] = depth[i] + (filtered - depth[i]) * strength;
+      }
+    }
+    depth.set(_reliefTemp);
+  }
+}
+
 export function solvePoissonSurfaceFromNormals(
   buffers: CNNReconstructionBuffers,
   params: ReconstructionParams
@@ -1106,6 +1166,15 @@ export function solvePoissonSurfaceFromNormals(
       }
     }
   }
+
+  // Edge-aware relief smoothing: removes lumps/spikes caused by shading and
+  // specular highlights while keeping the borders between armour pieces.
+  smoothReliefEdgeAware(
+    depthTensor,
+    rgbInput,
+    buffers.exteriorBgMask,
+    Math.max(0.0, Math.min(1.0, params.reliefEdgeSmoothing ?? 0.7))
+  );
 
   // Evaluate Outer Frame & Color / Hue Tone Cutout Mask (Zero-GC)
   evaluateBackgroundCutoutMask(buffers, params);
@@ -4506,6 +4575,455 @@ function weldCloseVerticesZeroGC(
   return weldedCount;
 }
 
+// ============================================================================
+// SILHOUETTE INFLATION (rounded volume from the drawing's own outline)
+// Every part of the silhouette gets a circular cross-section whose radius is
+// the local half-width of that part: arms/legs become tubes, the torso gets
+// more depth, and the border meets the back shell with a vertical tangent
+// instead of a thin flat flange.
+// ============================================================================
+const _inflDist = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+const _inflRadius = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+const _inflHeight = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+const _inflTemp = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+
+function buildSilhouetteInflation(mask: Uint8Array): void {
+  const w = CNN_TENSOR_SIZE;
+  const h = CNN_TENSOR_SIZE;
+  const INF = 1e6;
+  const D = _inflDist;
+
+  // 1) Distance to the outside (3-4 chamfer, scaled to texels).
+  for (let i = 0; i < w * h; i++) D[i] = mask[i] === 1 ? INF : 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (D[i] === 0) continue;
+      let d = D[i];
+      if (x === 0 || y === 0) d = Math.min(d, 1);
+      if (x > 0) d = Math.min(d, D[i - 1] + 1);
+      if (y > 0) {
+        d = Math.min(d, D[i - w] + 1);
+        if (x > 0) d = Math.min(d, D[i - w - 1] + 1.4142);
+        if (x < w - 1) d = Math.min(d, D[i - w + 1] + 1.4142);
+      }
+      D[i] = d;
+    }
+  }
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      if (D[i] === 0) continue;
+      let d = D[i];
+      if (x === w - 1 || y === h - 1) d = Math.min(d, 1);
+      if (x < w - 1) d = Math.min(d, D[i + 1] + 1);
+      if (y < h - 1) {
+        d = Math.min(d, D[i + w] + 1);
+        if (x < w - 1) d = Math.min(d, D[i + w + 1] + 1.4142);
+        if (x > 0) d = Math.min(d, D[i + w - 1] + 1.4142);
+      }
+      D[i] = d;
+    }
+  }
+  // Border pixels sit half a texel inside the real outline.
+  for (let i = 0; i < w * h; i++) if (D[i] > 0) D[i] -= 0.5;
+
+  // 2) Local radius: every inside pixel stamps its inscribed disk with its
+  //    own distance; each pixel keeps the largest disk that covers it.
+  const R = _inflRadius;
+  R.fill(0);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const r = D[y * w + x];
+      if (r < 1) continue;
+      // Only near-medial pixels matter; skip pixels dominated by a neighbour.
+      const i = y * w + x;
+      if (
+        (x > 0 && D[i - 1] > r + 0.5) ||
+        (x < w - 1 && D[i + 1] > r + 0.5) ||
+        (y > 0 && D[i - w] > r + 0.5) ||
+        (y < h - 1 && D[i + w] > r + 0.5)
+      ) {
+        continue;
+      }
+      const ri = Math.ceil(r);
+      const r2 = r * r;
+      for (let dy = -ri; dy <= ri; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -ri; dx <= ri; dx++) {
+          if (dx * dx + dy * dy > r2) continue;
+          const xx = x + dx;
+          if (xx < 0 || xx >= w) continue;
+          const j = yy * w + xx;
+          if (R[j] < r) R[j] = r;
+        }
+      }
+    }
+  }
+
+  // 3) Circular cross-section: height = sqrt(2·R·d − d²).
+  const H = _inflHeight;
+  for (let i = 0; i < w * h; i++) {
+    const d = D[i];
+    if (d <= 0) {
+      H[i] = 0;
+      continue;
+    }
+    const r = Math.max(R[i], d);
+    H[i] = Math.sqrt(Math.max(0, 2 * r * d - d * d));
+  }
+
+  // 4) Blur (masked, so the border stays at 0) to hide chamfer/disk quantisation.
+  const k5 = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        for (let o = -2; o <= 2; o++) {
+          const sx = x + o < 0 ? 0 : x + o >= w ? w - 1 : x + o;
+          sum += H[y * w + sx] * k5[o + 2];
+        }
+        _inflTemp[y * w + x] = sum;
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (mask[i] !== 1) {
+          H[i] = 0;
+          continue;
+        }
+        let sum = 0;
+        for (let o = -2; o <= 2; o++) {
+          const sy = y + o < 0 ? 0 : y + o >= h ? h - 1 : y + o;
+          sum += _inflTemp[sy * w + x] * k5[o + 2];
+        }
+        H[i] = sum;
+      }
+    }
+  }
+}
+
+/** Inflation height (in texels) at grid coordinates u, v in [0, 1]. */
+function sampleInflationHeight(u: number, v: number): number {
+  const w = CNN_TENSOR_SIZE;
+  const x = Math.max(0, Math.min(w - 1.001, u * (w - 1)));
+  const y = Math.max(0, Math.min(w - 1.001, (1 - v) * (w - 1)));
+  const x0 = x | 0;
+  const y0 = y | 0;
+  const fx = x - x0;
+  const fy = y - y0;
+  const i = y0 * w + x0;
+  const a = _inflHeight[i] * (1 - fx) + _inflHeight[i + 1] * fx;
+  const b = _inflHeight[i + w] * (1 - fx) + _inflHeight[i + w + 1] * fx;
+  return a * (1 - fy) + b * fy;
+}
+
+// ============================================================================
+// SUB-PIXEL CONTOUR SNAPPING (removes the "saw-tooth" silhouette)
+// The cutout keeps whole grid quads, so the raw border follows grid steps.
+// Here every border vertex is slid onto the real 0.5 iso-line of a softly
+// blurred cutout mask, which follows the drawing's outline smoothly.
+// ============================================================================
+const _contourField = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+const _contourTemp = new Float32Array(CNN_TENSOR_SIZE * CNN_TENSOR_SIZE);
+const _snapDu = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _snapDv = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _snapDx = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _snapDy = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _bNbrA = new Int32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _bNbrB = new Int32Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _bNbrCount = new Uint8Array(CNNReconstructionBuffers.MAX_VERTICES);
+const _bTmp = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES * 4);
+const _uvBefore = new Float32Array(CNNReconstructionBuffers.MAX_VERTICES * 2);
+
+function buildSmoothContourField(mask: Uint8Array): void {
+  const w = CNN_TENSOR_SIZE;
+  const h = CNN_TENSOR_SIZE;
+  const k = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+  for (let i = 0; i < w * h; i++) _contourField[i] = mask[i] === 1 ? 1.0 : 0.0;
+  // Two separable 5-tap passes ≈ Gaussian with sigma ~1.4 texels: enough to
+  // turn pixel stairs into a smooth ramp whose 0.5 level is the outline.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) {
+      const r = y * w;
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        for (let o = -2; o <= 2; o++) {
+          const sx = x + o < 0 ? 0 : x + o >= w ? w - 1 : x + o;
+          sum += _contourField[r + sx] * k[o + 2];
+        }
+        _contourTemp[r + x] = sum;
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0;
+        for (let o = -2; o <= 2; o++) {
+          const sy = y + o < 0 ? 0 : y + o >= h ? h - 1 : y + o;
+          sum += _contourTemp[sy * w + x] * k[o + 2];
+        }
+        _contourField[y * w + x] = sum;
+      }
+    }
+  }
+}
+
+function sampleContourField(tx: number, ty: number): number {
+  const w = CNN_TENSOR_SIZE;
+  const x = Math.max(0, Math.min(w - 1.001, tx));
+  const y = Math.max(0, Math.min(w - 1.001, ty));
+  const x0 = x | 0;
+  const y0 = y | 0;
+  const fx = x - x0;
+  const fy = y - y0;
+  const i = y0 * w + x0;
+  const a = _contourField[i] * (1 - fx) + _contourField[i + 1] * fx;
+  const b = _contourField[i + w] * (1 - fx) + _contourField[i + w + 1] * fx;
+  return a * (1 - fy) + b * fy;
+}
+
+/**
+ * Moves the front-shell border vertices onto the smooth outline.
+ * Positions (x, y) are shifted in place; the matching UV shift is stored in
+ * _snapDu/_snapDv so the back shell (built later) can apply it too.
+ */
+function snapFrontBorderToContour(
+  posArr: Float32Array,
+  uvArr: Float32Array,
+  vertexCutoutMask: Uint8Array,
+  borderDistField: Float32Array,
+  texelCutoutMask: Uint8Array,
+  quadActiveMask: Uint8Array,
+  segs: number,
+  strength: number
+): void {
+  const cols = segs + 1;
+  const gridVerts = cols * cols;
+  for (let i = 0; i < gridVerts * 2; i++) _uvBefore[i] = uvArr[i];
+  _snapDu.fill(0, 0, gridVerts);
+  _snapDv.fill(0, 0, gridVerts);
+  _snapDx.fill(0, 0, gridVerts);
+  _snapDy.fill(0, 0, gridVerts);
+  if (strength <= 0.001) return;
+
+  buildSmoothContourField(texelCutoutMask);
+
+  const w = CNN_TENSOR_SIZE;
+  const cellTex = (w - 1) / segs; // texels per grid cell
+  const maxOut = 1.05 * cellTex; // never move further than ~one cell
+  const maxIn = 0.45 * cellTex; // moving inwards is riskier (triangle flips)
+
+  for (let iy = 1; iy < segs; iy++) {
+    for (let ix = 1; ix < segs; ix++) {
+      const vIdx = iy * cols + ix;
+      if (vertexCutoutMask[vIdx] !== 1 || borderDistField[vIdx] > 0.0) continue;
+
+      const tx0 = (ix / segs) * (w - 1);
+      const ty0 = (1 - iy / segs) * (w - 1);
+      let tx = tx0;
+      let ty = ty0;
+
+      // A few Newton steps along the field gradient towards the 0.5 level.
+      for (let it = 0; it < 5; it++) {
+        const f = sampleContourField(tx, ty) - 0.5;
+        const gx = 0.5 * (sampleContourField(tx + 1, ty) - sampleContourField(tx - 1, ty));
+        const gy = 0.5 * (sampleContourField(tx, ty + 1) - sampleContourField(tx, ty - 1));
+        const g2 = gx * gx + gy * gy;
+        if (g2 < 1e-6) break;
+        tx -= (f * gx) / g2;
+        ty -= (f * gy) / g2;
+        if (Math.abs(f) < 0.01) break;
+      }
+
+      let dtx = tx - tx0;
+      let dty = ty - ty0;
+      const len = Math.hypot(dtx, dty);
+      if (len < 1e-4) continue;
+      // Outward = towards lower field values.
+      const outward =
+        sampleContourField(tx0 + dtx / len, ty0 + dty / len) < sampleContourField(tx0, ty0);
+      const lim = outward ? maxOut : maxIn;
+      if (len > lim) {
+        dtx *= lim / len;
+        dty *= lim / len;
+      }
+      dtx *= strength;
+      dty *= strength;
+
+      // Texel offset -> grid-cell offset (grid v grows upwards, texel y downwards).
+      const di = dtx / cellTex;
+      const dj = -dty / cellTex;
+
+      // Local world-space axes of the grid at this vertex (handles mold warps).
+      const pR = (vIdx + 1) * 3;
+      const pL = (vIdx - 1) * 3;
+      const pU = (vIdx + cols) * 3;
+      const pD = (vIdx - cols) * 3;
+      const axX = 0.5 * (posArr[pR] - posArr[pL]);
+      const axY = 0.5 * (posArr[pR + 1] - posArr[pL + 1]);
+      const ayX = 0.5 * (posArr[pU] - posArr[pD]);
+      const ayY = 0.5 * (posArr[pU + 1] - posArr[pD + 1]);
+
+      _snapDx[vIdx] = di * axX + dj * ayX;
+      _snapDy[vIdx] = di * axY + dj * ayY;
+      _snapDu[vIdx] = (di / segs) * 0.495;
+      _snapDv[vIdx] = -(dj / segs) * 0.495;
+    }
+  }
+
+  // Apply after all offsets are known so neighbours read unmodified positions.
+  for (let vIdx = 0; vIdx < gridVerts; vIdx++) {
+    if (_snapDx[vIdx] === 0 && _snapDy[vIdx] === 0) continue;
+    posArr[vIdx * 3] += _snapDx[vIdx];
+    posArr[vIdx * 3 + 1] += _snapDy[vIdx];
+    uvArr[vIdx * 2] += _snapDu[vIdx];
+    uvArr[vIdx * 2 + 1] += _snapDv[vIdx];
+  }
+
+  smoothBorderChain(posArr, uvArr, quadActiveMask, segs, strength);
+  relaxNearBorderRing(posArr, uvArr, vertexCutoutMask, borderDistField, segs, strength);
+
+  // Record the total UV shift (snap + chain smoothing) for the back shell.
+  for (let vIdx = 0; vIdx < gridVerts; vIdx++) {
+    _snapDu[vIdx] = uvArr[vIdx * 2] - _uvBefore[vIdx * 2];
+    _snapDv[vIdx] = uvArr[vIdx * 2 + 1] - _uvBefore[vIdx * 2 + 1];
+  }
+}
+
+/**
+ * After the outline moved, the first rows inside it are unevenly spaced
+ * (one row hugs the border, the next is a full cell away), which shows up as
+ * horizontal ripples on the sides. A few Laplacian steps on those rows only
+ * (the outline itself stays pinned) even the spacing out.
+ */
+function relaxNearBorderRing(
+  posArr: Float32Array,
+  uvArr: Float32Array,
+  vertexCutoutMask: Uint8Array,
+  borderDistField: Float32Array,
+  segs: number,
+  strength: number
+): void {
+  const cols = segs + 1;
+  const band = 2.6;
+  const iterations = Math.round(4 * strength);
+  for (let it = 0; it < iterations; it++) {
+    for (let iy = 1; iy < segs; iy++) {
+      for (let ix = 1; ix < segs; ix++) {
+        const v = iy * cols + ix;
+        const d = borderDistField[v];
+        if (vertexCutoutMask[v] !== 1 || d <= 0.0 || d > band) continue;
+        const o = v * 4;
+        let sx = 0, sy = 0, su = 0, sv = 0, n = 0;
+        for (const nb of [v - 1, v + 1, v - cols, v + cols]) {
+          if (vertexCutoutMask[nb] !== 1) continue;
+          sx += posArr[nb * 3];
+          sy += posArr[nb * 3 + 1];
+          su += uvArr[nb * 2];
+          sv += uvArr[nb * 2 + 1];
+          n++;
+        }
+        if (n < 3) {
+          _bTmp[o] = NaN;
+          continue;
+        }
+        // Weaker pull deeper inside so the change fades out smoothly.
+        const k = 0.5 * (1 - d / (band + 0.5));
+        _bTmp[o] = posArr[v * 3] + k * (sx / n - posArr[v * 3]);
+        _bTmp[o + 1] = posArr[v * 3 + 1] + k * (sy / n - posArr[v * 3 + 1]);
+        _bTmp[o + 2] = uvArr[v * 2] + k * (su / n - uvArr[v * 2]);
+        _bTmp[o + 3] = uvArr[v * 2 + 1] + k * (sv / n - uvArr[v * 2 + 1]);
+      }
+    }
+    for (let iy = 1; iy < segs; iy++) {
+      for (let ix = 1; ix < segs; ix++) {
+        const v = iy * cols + ix;
+        const d = borderDistField[v];
+        if (vertexCutoutMask[v] !== 1 || d <= 0.0 || d > band) continue;
+        const o = v * 4;
+        if (Number.isNaN(_bTmp[o])) continue;
+        posArr[v * 3] = _bTmp[o];
+        posArr[v * 3 + 1] = _bTmp[o + 1];
+        uvArr[v * 2] = _bTmp[o + 2];
+        uvArr[v * 2 + 1] = _bTmp[o + 3];
+      }
+    }
+  }
+}
+
+/**
+ * Smooths the outline as a curve: each border vertex with exactly two border
+ * neighbours is pulled towards their midpoint (Taubin λ/μ so the silhouette
+ * does not shrink). Removes the remaining notches and single-vertex spikes.
+ * UVs are smoothed with the same weights so the texture stays glued on.
+ */
+function smoothBorderChain(
+  posArr: Float32Array,
+  uvArr: Float32Array,
+  quadActiveMask: Uint8Array,
+  segs: number,
+  strength: number
+): void {
+  const cols = segs + 1;
+  const gridVerts = cols * cols;
+  _bNbrCount.fill(0, 0, gridVerts);
+
+  const link = (a: number, b: number) => {
+    const ca = _bNbrCount[a];
+    if (ca === 0) _bNbrA[a] = b;
+    else if (ca === 1) _bNbrB[a] = b;
+    _bNbrCount[a] = Math.min(255, ca + 1);
+    const cb = _bNbrCount[b];
+    if (cb === 0) _bNbrA[b] = a;
+    else if (cb === 1) _bNbrB[b] = a;
+    _bNbrCount[b] = Math.min(255, cb + 1);
+  };
+
+  // Same boundary-edge rule the lateral seam uses.
+  for (let iy = 0; iy < segs; iy++) {
+    for (let ix = 0; ix < segs; ix++) {
+      if (quadActiveMask[iy * segs + ix] === 0) continue;
+      const a = iy * cols + ix;
+      const b = a + 1;
+      const c = a + cols;
+      const d = c + 1;
+      if (iy === 0 || quadActiveMask[(iy - 1) * segs + ix] === 0) link(a, b);
+      if (iy === segs - 1 || quadActiveMask[(iy + 1) * segs + ix] === 0) link(c, d);
+      if (ix === 0 || quadActiveMask[iy * segs + ix - 1] === 0) link(a, c);
+      if (ix === segs - 1 || quadActiveMask[iy * segs + ix + 1] === 0) link(b, d);
+    }
+  }
+
+  const iterations = Math.round(6 * strength);
+  const lambda = 0.5;
+  const mu = -0.53;
+  for (let it = 0; it < iterations * 2; it++) {
+    const k = it % 2 === 0 ? lambda : mu;
+    for (let v = 0; v < gridVerts; v++) {
+      if (_bNbrCount[v] !== 2) continue;
+      const a = _bNbrA[v];
+      const b = _bNbrB[v];
+      const o = v * 4;
+      _bTmp[o] = posArr[v * 3] + k * (0.5 * (posArr[a * 3] + posArr[b * 3]) - posArr[v * 3]);
+      _bTmp[o + 1] =
+        posArr[v * 3 + 1] + k * (0.5 * (posArr[a * 3 + 1] + posArr[b * 3 + 1]) - posArr[v * 3 + 1]);
+      _bTmp[o + 2] = uvArr[v * 2] + k * (0.5 * (uvArr[a * 2] + uvArr[b * 2]) - uvArr[v * 2]);
+      _bTmp[o + 3] =
+        uvArr[v * 2 + 1] + k * (0.5 * (uvArr[a * 2 + 1] + uvArr[b * 2 + 1]) - uvArr[v * 2 + 1]);
+    }
+    for (let v = 0; v < gridVerts; v++) {
+      if (_bNbrCount[v] !== 2) continue;
+      const o = v * 4;
+      posArr[v * 3] = _bTmp[o];
+      posArr[v * 3 + 1] = _bTmp[o + 1];
+      uvArr[v * 2] = _bTmp[o + 2];
+      uvArr[v * 2 + 1] = _bTmp[o + 3];
+    }
+  }
+}
+
 export function buildReconstructedMeshGeometry(
   geometry: THREE.BufferGeometry,
   buffers: CNNReconstructionBuffers,
@@ -4525,6 +5043,24 @@ export function buildReconstructedMeshGeometry(
 } {
   const poissonSolveMs = solvePoissonSurfaceFromNormals(buffers, params);
   const t0 = performance.now();
+
+  // Rounded volume derived from the silhouette (world units per texel ≈ slab width / texels).
+  const inflationAmount = Math.max(0.0, Math.min(1.5, params.silhouetteInflation ?? 0.75));
+  if (inflationAmount > 0.001) buildSilhouetteInflation(buffers.texelCutoutMask);
+  const inflationWorldScale = (2.85 / (CNN_TENSOR_SIZE - 1)) * inflationAmount;
+  // Inflation for a grid vertex; exactly 0 on the border so the outline stays thin
+  // and the lateral seam closes it smoothly.
+  // Photo relief fades out over the last cells before the outline, so the outline
+  // keeps the clean rounded profile and front/back meet without a ridge.
+  const reliefFadeCells =
+    inflationAmount > 0.001 ? Math.max(2.5, Math.max(32, Math.min(144, params.gridResolution)) * 0.035) : 0.0;
+  const reliefBorderFade = (gridIdx: number) => {
+    if (reliefFadeCells <= 0.0) return 1.0;
+    const t = Math.min(1.0, Math.max(0.0, buffers.borderDistField[gridIdx] / reliefFadeCells));
+    return t * t * (3.0 - 2.0 * t);
+  };
+  const inflationAt = (gridIdx: number, gu: number, gv: number) =>
+    buffers.borderDistField[gridIdx] <= 0.0 ? 0.0 : sampleInflationHeight(gu, gv);
 
   const segs = Math.max(32, Math.min(144, params.gridResolution));
   const cols = segs + 1;
@@ -4958,10 +5494,9 @@ export function buildReconstructedMeshGeometry(
 
         const rawPedestal = detectLines ? 0.08 * (1.0 - facetPlanarity * 0.5) : 0.12;
         const basePedestal = rawPedestal * (1.0 - reliefInflationSupp * 0.88);
-        const imageRelief = Math.max(
-          0,
-          (totalDisplacement * 0.85 + harmonicWave + basePedestal) * rimBevel
-        );
+        const imageRelief =
+          Math.max(0, (totalDisplacement * 0.85 + harmonicWave + basePedestal) * rimBevel) *
+          reliefBorderFade(vIdx);
 
         // Silhouette Distance Dome: 0.0 right at the drawing's silhouette border (union zone), rising smoothly inside
         const dSil = Math.min(1.0, borderDistField[vIdx] / silArchRadiusCells);
@@ -4976,7 +5511,11 @@ export function buildReconstructedMeshGeometry(
           const blendedCarrierZ = smax3D(rawShapeZ * _limbZMult, silFloorZ, 0.065);
           const silEdgeEnvelope =
             (1.0 - silConformity * 0.86) + (silConformity * 0.86) * silDomeArch;
-          const shapeVolumeZ = blendedCarrierZ * silEdgeEnvelope * moldStrength;
+          const moldVolumeZ = blendedCarrierZ * silEdgeEnvelope * moldStrength;
+          const shapeVolumeZ =
+            inflationAmount > 0.001
+              ? smax3D(moldVolumeZ, inflationAt(vIdx, u, v) * inflationWorldScale * _limbZMult, 0.05)
+              : moldVolumeZ;
 
           const surfaceDetailScale = 1.0 - reliefInflationSupp * 0.42;
           // Lock XY displacement to 0 at the silhouette border so the union is 100% equal to the silhouette
@@ -4991,7 +5530,9 @@ export function buildReconstructedMeshGeometry(
         } else {
           px = slabX;
           py = slabY;
-          pz = halfGap + imageRelief * _limbZMult;
+          const inflZ =
+            inflationAmount > 0.001 ? inflationAt(vIdx, u, v) * inflationWorldScale : 0.0;
+          pz = halfGap + (inflZ + imageRelief) * _limbZMult;
         }
       } else if (params.topology === MathTopology.SphericalHarmonics) {
         const theta = (1.0 - v) * Math.PI;
@@ -5246,9 +5787,31 @@ export function buildReconstructedMeshGeometry(
 
         const z3 = vIdx * 3 + 2;
         const relZ = Math.max(0.0, posArr[z3] - halfGap);
-        posArr[z3] = localHalfGap + relZ * edgeRetention;
+        // Keep the rounded silhouette volume: the taper may only remove what lies above it.
+        const inflFloor =
+          inflationAmount > 0.001
+            ? Math.min(relZ, inflationAt(vIdx, (vIdx % cols) / segs, ((vIdx / cols) | 0) / segs) * inflationWorldScale)
+            : 0.0;
+        posArr[z3] = localHalfGap + Math.max(relZ * edgeRetention, inflFloor);
       }
     }
+  }
+
+  // Step 2A: slide border vertices onto the real outline (removes grid stair-steps)
+  if (params.topology === MathTopology.MonolithRelief) {
+    snapFrontBorderToContour(
+      posArr,
+      uvArr,
+      vertexCutoutMask,
+      borderDistField,
+      texelCutoutMask,
+      quadActiveMask,
+      segs,
+      Math.max(0.0, Math.min(1.0, params.contourSnapStrength ?? 1.0))
+    );
+  } else {
+    _snapDu.fill(0, 0, gridVerts);
+    _snapDv.fill(0, 0, gridVerts);
   }
 
   // ============================================================================
@@ -5342,6 +5905,15 @@ export function buildReconstructedMeshGeometry(
           const silEdgeEnvelope =
             (1.0 - silConformity * 0.86) + (silConformity * 0.86) * silDomeArch;
           backShapeZ = blendedBackCarrierZ * silEdgeEnvelope * moldStrength;
+          if (inflationAmount > 0.001) {
+            backShapeZ = smax3D(
+              backShapeZ,
+              inflationAt(frontVIdx, u, v) * inflationWorldScale * _limbZMult,
+              0.05
+            );
+          }
+        } else if (inflationAmount > 0.001) {
+          backShapeZ = inflationAt(frontVIdx, u, v) * inflationWorldScale * _limbZMult;
 
           if (_shapeInside === 1) {
             backShapeNz = _shapeNz;
@@ -5456,6 +6028,8 @@ export function buildReconstructedMeshGeometry(
             (backDepth * backWeight * 0.85 + 0.06 * (1.0 - reliefInflationSupp * 0.85)) * rimBevel
           );
         }
+
+        localBackRelief *= reliefBorderFade(frontVIdx);
 
         const surfaceDetailScale = hasPresetShape ? 1.0 - reliefInflationSupp * 0.42 : 1.0;
         // Maintain 100% of the 3D Mold dorsal volume on the Back Shell (never squashed when backWeight < 1),
@@ -5594,7 +6168,15 @@ export function buildReconstructedMeshGeometry(
             halfGap * ((1.0 - seamlessSmooth * 0.96) + seamlessSmooth * 0.96 * smoothDome);
 
           const relBackZ = Math.max(0.0, -halfGap - posArr[b3 + 2]);
-          let newBackZ = localHalfGap + relBackZ * edgeRetention;
+          const backInflFloor =
+            inflationAmount > 0.001
+              ? Math.min(
+                  relBackZ,
+                  inflationAt(frontVIdx, (frontVIdx % cols) / segs, ((frontVIdx / cols) | 0) / segs) *
+                    inflationWorldScale
+                )
+              : 0.0;
+          let newBackZ = localHalfGap + Math.max(relBackZ * edgeRetention, backInflFloor);
           let newFrontZ = Math.max(0.0, posArr[f3 + 2]);
 
           // Harmonize Front & Back border curvature and color near the union line so both parts merge seamlessly!
@@ -5821,6 +6403,16 @@ export function buildReconstructedMeshGeometry(
       ringNormZ[3] = -Math.sin(theta1);
       ringNormOut[4] = Math.cos(theta2 * 0.85);
       ringNormZ[4] = -Math.sin(theta2 * 0.85);
+    }
+
+    // Back shell shares the front outline, so give its UVs the same contour shift.
+    for (let vIdx = 0; vIdx < gridVerts; vIdx++) {
+      const du = _snapDu[vIdx];
+      const dv = _snapDv[vIdx];
+      if (du === 0 && dv === 0) continue;
+      const b2 = (gridVerts + vIdx) * 2;
+      uvArr[b2] += du;
+      uvArr[b2 + 1] += dv;
     }
 
     const {

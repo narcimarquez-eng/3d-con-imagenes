@@ -1522,6 +1522,9 @@ interface ShoePart {
  * heel back), lower towards the toe and cut flat at the sole. It is textured
  * with the front image of the boot and covers the end of the leg.
  */
+/** How far each foot is turned outwards from straight ahead (Pose A 55°: toes point out). */
+const FOOT_TURN_RAD = (40 * Math.PI) / 180;
+
 function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWorld: number): ShoePart[] {
   const H = lm.bottom - lm.top + 1;
   if (H < 20) return [];
@@ -1577,6 +1580,8 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
     // ...and the toe always reaches well past the front of the leg.
     const toeZ = Math.max(0.75 * length, halfW * 0.9 + 0.45 * length);
     const span = toeZ - heelZ;
+    // Ankle: the pivot for turning the boot outwards.
+    const pivotZ = heelZ + 0.25 * span;
 
     // Boot shape from a sphere: boxier section, flat sole, high heel side, low toe.
     const box = (v: number, e: number) => Math.sign(v) * Math.pow(Math.abs(v), e);
@@ -1598,9 +1603,15 @@ function buildShoes(mask: Uint8Array, w: number, lm: HumanBodyLandmarks, texelWo
       const X = cx + ux * halfW * wp;
       const Y = soleY + ((uy + 1) / 2) * height0 * hp;
       const Z = heelZ + t * span;
-      pos[i * 3] = X;
+      // Turn the boot about the ankle so the toe points outwards, as the feet
+      // do in the sheet (the image-left foot points left, the other one right).
+      // The UVs above use the unturned position, so the texture still matches.
+      const a = side * FOOT_TURN_RAD;
+      const dx = X - cx;
+      const dz = Z - pivotZ;
+      pos[i * 3] = cx + dx * Math.cos(a) + dz * Math.sin(a);
       pos[i * 3 + 1] = Y;
-      pos[i * 3 + 2] = Z;
+      pos[i * 3 + 2] = pivotZ - dx * Math.sin(a) + dz * Math.cos(a);
       // Front projection of the boot, kept inside the foot's own pixels.
       const tx = Math.max(minX + 1, Math.min(maxX - 1, (X / WORLD_SPAN + 0.5) * (w - 1)));
       const ty = Math.max(ankleY - 0.06 * H, Math.min(lm.bottom - 1.5, (0.5 - Y / WORLD_SPAN) * (w - 1)));

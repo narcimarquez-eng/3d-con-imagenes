@@ -416,6 +416,9 @@ export const RIG_ANIMATIONS = [
   { id: 'run', label: 'Correr' },
   { id: 'wave', label: 'Saludar' },
   { id: 'strike', label: 'Golpear' },
+  { id: 'jumpBite', label: 'JumpBite' },
+  { id: 'hit', label: 'Hit' },
+  { id: 'death', label: 'Death' },
 ] as const;
 
 export type RigAnimationId = (typeof RIG_ANIMATIONS)[number]['id'];
@@ -670,7 +673,72 @@ export function createHumanAnimationClips(rig: HumanRig): THREE.AnimationClip[] 
     };
   });
 
-  return [idle, walk, run, wave, strike];
+  // The enemy set of the world creator (Idle, Walk, Attack, JumpBite, Hit, Death),
+  // with the same names and about the same durations. Idle, Walk and Attack are
+  // Reposo, Caminar and Golpear.
+
+  // JumpBite: crouch, leap forward, bite (head and chest lunge), land and recover.
+  const jumpBite = build('JumpBite', 1.85, 48, (p) => {
+    const k = (pts: Array<[number, number]>) => strikeKey(p, pts);
+    const lunge = k([[0, 0], [0.25, 0], [0.45, 1], [0.6, 1], [0.8, 0], [1, 0]]);
+    return {
+      armFrames: true,
+      hipsOffset: [0, k([[0, 0], [0.25, -0.05 * height], [0.45, 0.1 * height], [0.6, 0.02 * height], [1, 0]]), 0],
+      rot: {
+        Hips: [0, 0, 0],
+        Spine: [18 * DEG * lunge, 0, 0],
+        Chest: [22 * DEG * lunge, 0, 0],
+        Head: [-25 * DEG * k([[0, 0], [0.45, 0], [0.55, 1], [0.7, 1], [0.85, 0], [1, 0]]), 0, 0],
+        RightUpLeg: [k([[0, 0], [0.25, -20 * DEG], [0.45, 25 * DEG], [0.8, 0], [1, 0]]), 0, 0],
+        LeftUpLeg: [k([[0, 0], [0.25, 20 * DEG], [0.45, -25 * DEG], [0.8, 0], [1, 0]]), 0, 0],
+        RightLeg: [k([[0, 0], [0.25, 70 * DEG], [0.45, 10 * DEG], [0.8, 0], [1, 0]]), 0, 0],
+        LeftLeg: [k([[0, 0], [0.25, 70 * DEG], [0.45, 10 * DEG], [0.8, 0], [1, 0]]), 0, 0],
+        RightArm: [k([[0, 0], [0.25, -60 * DEG], [0.5, 85 * DEG], [0.8, 60 * DEG], [1, 0]]), 0, 0],
+        LeftArm: [k([[0, 0], [0.25, -60 * DEG], [0.5, 85 * DEG], [0.8, 60 * DEG], [1, 0]]), 0, 0],
+        RightForeArm: [-20 * DEG, 0, 0],
+        LeftForeArm: [-20 * DEG, 0, 0],
+      },
+    };
+  });
+
+  // Hit: a short jolt backwards, then back to rest.
+  const hit = build('Hit', 0.75, 24, (p) => {
+    const k = (pts: Array<[number, number]>) => strikeKey(p, pts);
+    const jolt = k([[0, 0], [0.2, 1], [0.5, 0.4], [1, 0]]);
+    return {
+      armFrames: true,
+      rot: {
+        Chest: [-18 * DEG * jolt, 6 * DEG * jolt, 0],
+        Spine: [-10 * DEG * jolt, 0, 0],
+        Head: [-22 * DEG * jolt, 0, 10 * DEG * jolt],
+        RightArm: [-30 * DEG * jolt, 0, 0],
+        LeftArm: [-30 * DEG * jolt, 0, 0],
+      },
+    };
+  });
+
+  // Death: stagger, then fall backwards and sink to the ground; the last part holds.
+  const death = build('Death', 1.5, 48, (p) => {
+    const k = (pts: Array<[number, number]>) => strikeKey(p, pts);
+    const fall = k([[0, 0], [0.15, 0.1], [0.45, 0.5], [0.7, 1], [1, 1]]);
+    const knees = k([[0, 0], [0.45, 0], [0.7, 1], [1, 1]]);
+    return {
+      armFrames: true,
+      hipsOffset: [0, -0.3 * height * k([[0, 0], [0.7, 1], [1, 1]]), 0],
+      rot: {
+        Hips: [-80 * DEG * fall, 0, 0],
+        RightUpLeg: [40 * DEG * knees, 0, 0],
+        LeftUpLeg: [-30 * DEG * knees, 0, 0],
+        RightLeg: [70 * DEG * knees, 0, 0],
+        LeftLeg: [60 * DEG * knees, 0, 0],
+        RightArm: [-40 * DEG * fall, 0, 0],
+        LeftArm: [-40 * DEG * fall, 0, 0],
+        Head: [30 * DEG * fall, 0, 0],
+      },
+    };
+  });
+
+  return [idle, walk, run, wave, strike, jumpBite, hit, death];
 }
 
 export function clipNameForAnimation(id: string): string | null {

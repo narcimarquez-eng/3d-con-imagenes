@@ -16,7 +16,8 @@ Todo se ejecuta desde la raíz del repo. Los scripts están en `.claude/skills/p
 3. Si te dan **una hoja con cuatro paneles** (foto frente, foto espalda, mapa frente, mapa espalda, de izquierda a derecha):
    `python3 scripts/split_sheet.py hoja.jpg salida/ --prefix orco`
    Separa los paneles, quita títulos y etiquetas y alinea cada mapa con su foto píxel a píxel (busca el desplazamiento por solapamiento de siluetas; revisa el IoU que imprime, > 0,7 es bueno).
-4. Exporta:
+   Después, **siempre**: `python3 scripts/limpiar_paneles.py salida/orco_*.png`, que deja en cada panel solo el personaje y borra los trozos del panel vecino que se cuelan por el borde. Un trozo de la mano del dibujo de al lado basta para que esa fila cuente como "cuerpo" de lado a lado y el modelo salga con una repisa plana atravesándolo.
+4. Exporta (usa los `_limpio.png`):
    `node scripts/export_glb.cjs --front f.png --back b.png [--layer-front lf.png --layer-back lb.png] [--rig --anim walk] --out modelo.glb`
 5. Revisa el resultado (siempre, antes de enseñarlo):
    `node scripts/render_glb.cjs --glb modelo.glb --out renders/m --clay --head --anims`
@@ -93,6 +94,7 @@ En la app: pestaña **Moldes**, panel "Cuerpo humano ajustado a la silueta", sec
 - **Mapas pintados en JPEG:** los colores no son puros; el verde de piel del usuario era (12,156,12). Por eso se clasifica por tono.
 - **Índices de fila:** redondéalos siempre (un `neckY` con decimales rompió `runsByRow`).
 - **Pruebas sin navegador:** pueden engañar si el recorte no es idéntico al de la app; para datos fiables, lee los resultados desde la app.
+- **Restos del panel vecino:** al separar una hoja de cuatro paneles, un trozo del dibujo de al lado pegado al borde se cuela en el recorte. Si ese trozo es gris medio o de color, el mapa de capas lo cuenta como cuerpo, la fila pasa a ocupar todo el ancho y el modelo sale con una repisa plana a esa altura. Pásale siempre `limpiar_paneles.py` y comprueba que ninguna fila del mapa ocupa más del 95% del ancho.
 - **Animación Saludar:** la hombrera se queda en su sitio y la axila se estira. Es una limitación conocida.
 
 ## Pruebas y entrega

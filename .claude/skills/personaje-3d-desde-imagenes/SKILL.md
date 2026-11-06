@@ -17,6 +17,13 @@ Todo se ejecuta desde la raíz del repo. Los scripts están en `.claude/skills/p
    `python3 scripts/split_sheet.py hoja.jpg salida/ --prefix orco`
    Separa los paneles, quita títulos y etiquetas y alinea cada mapa con su foto píxel a píxel (busca el desplazamiento por solapamiento de siluetas; revisa el IoU que imprime, > 0,7 es bueno).
    Después, **siempre**: `python3 scripts/limpiar_paneles.py salida/orco_*.png`, que deja en cada panel solo el personaje y borra los trozos del panel vecino que se cuelan por el borde. Un trozo de la mano del dibujo de al lado basta para que esa fila cuente como "cuerpo" de lado a lado y el modelo salga con una repisa plana atravesándolo.
+3b. Si la hoja trae **ocho paneles** (dos filas de cuatro: natural arriba, codificada abajo,
+   con frente, perfil izquierdo, perfil derecho y espalda):
+   `python3 scripts/separar_hoja8.py hoja.jpg salida/ orco`
+   Saca los ocho con su nombre (`orco_frente.png`, `orco_perfil_izq.png`, ... y los `_capas`).
+   La vista de perfil **solo la usa salon-3d** (panel "Humano desde imágenes"), que mide en
+   ella el grosor del cuerpo a cada altura; esta app todavía no la aprovecha para el molde.
+
 4. Exporta (usa los `_limpio.png`):
    `node scripts/export_glb.cjs --front f.png --back b.png [--layer-front lf.png --layer-back lb.png] [--rig --anim walk] --out modelo.glb`
 5. Revisa el resultado (siempre, antes de enseñarlo):
